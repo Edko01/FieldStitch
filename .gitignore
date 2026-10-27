@@ -4,3 +4,4 @@ python/
 _update/
 dist/
 *.zip
+!updates/*.zip

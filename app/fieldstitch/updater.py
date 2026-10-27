@@ -1,9 +1,9 @@
-"""Check GitHub releases for a newer FieldStitch and install it in place.
+"""Check GitHub for a newer FieldStitch and install it in place.
 
-Each release on github.com/<UPDATE_REPO> carries:
-  update.json                 {"version", "runtime", "app_zip", "sha256", "notes", "full_zip"}
-  fieldstitch-app-<ver>.zip   the new "app" folder (small, used for in-place updates)
-  FieldStitch-<ver>-win64.zip the full package (for fresh installs / runtime changes)
+Updates are published in the repo itself (github.com/<UPDATE_REPO>, branch main):
+  updates/latest.json   {"version", "runtime", "app_zip", "sha256", "notes", "full_url"}
+  updates/fieldstitch-app-<ver>.zip   the new "app" folder
+They are read from raw.githubusercontent.com, so no GitHub account or token is needed.
 """
 import hashlib
 import json
@@ -55,12 +55,16 @@ def _get(url, timeout=20):
     return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
 
+def _raw_base():
+    return os.environ.get("FIELDSTITCH_UPDATE_RAW",
+                          "https://raw.githubusercontent.com/%s/main" % UPDATE_REPO).rstrip("/")
+
+
 def check():
-    base = os.environ.get("FIELDSTITCH_UPDATE_API", "https://api.github.com")
-    url = "%s/repos/%s/releases/latest" % (base, UPDATE_REPO)
+    base = _raw_base()
     try:
-        with _get(url) as r:
-            rel = json.loads(r.read().decode("utf-8"))
+        with _get("%s/updates/latest.json?t=%d" % (base, int(time.time()))) as r:
+            man = json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return {"ok": True, "current": __version__, "available": False,
@@ -68,32 +72,19 @@ def check():
         return {"ok": False, "message": "GitHub answered with an error (%d). Try again later." % e.code}
     except Exception:
         return {"ok": False, "message": "Couldn't reach GitHub. Check the internet connection and try again."}
-    assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
-    manifest = None
-    if "update.json" in assets:
-        try:
-            with _get(assets["update.json"]) as r:
-                manifest = json.loads(r.read().decode("utf-8"))
-        except Exception:
-            manifest = None
-    latest = (manifest or {}).get("version") or rel.get("tag_name", "").lstrip("vV")
+    latest = str(man.get("version", "0"))
     available = vtuple(latest) > vtuple(__version__)
+    page = "https://github.com/%s" % UPDATE_REPO
     out = {"ok": True, "current": __version__, "latest": latest, "available": available,
-           "notes": (manifest or {}).get("notes") or rel.get("body") or "",
-           "page": rel.get("html_url"), "published": rel.get("published_at")}
+           "notes": man.get("notes", ""), "page": page, "published": man.get("date")}
     if available:
-        need_rt = int((manifest or {}).get("runtime", RUNTIME))
-        app_zip = (manifest or {}).get("app_zip")
-        if not manifest or not app_zip or app_zip not in assets:
-            out["needs_full"] = True
-        elif need_rt > installed_runtime():
+        app_zip = man.get("app_zip")
+        if not app_zip or int(man.get("runtime", RUNTIME)) > installed_runtime():
             out["needs_full"] = True
         else:
             out["needs_full"] = False
-            out["_download"] = {"url": assets[app_zip], "sha256": manifest.get("sha256", "")}
-        full = (manifest or {}).get("full_zip")
-        if full and full in assets:
-            out["full_url"] = assets[full]
+            out["_download"] = {"url": "%s/%s" % (base, app_zip), "sha256": man.get("sha256", "")}
+        out["full_url"] = man.get("full_url") or page
     return out
 
 

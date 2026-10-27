@@ -6,7 +6,7 @@ Import a folder of nadir photos, process them into a georeferenced GeoTIFF ortho
 
 ## Download
 
-Get the latest `FieldStitch-<version>-win64.zip` from [Releases](../../releases/latest), unzip it, and double-click **Start FieldStitch.bat**. Installed copies update themselves from this repo's releases via the **Check for updates** button.
+Unzip the FieldStitch Windows package and double-click **Start FieldStitch.bat**. Installed copies update themselves from this repo via the **Check for updates** button (they read `updates/latest.json` on `main`).
 
 ## How it works
 
@@ -24,6 +24,7 @@ The Windows package bundles a portable CPython 3.12 (python-build-standalone) wi
 
 ## Releasing an update
 
-1. Bump `__version__` in `app/fieldstitch/__init__.py` (bump `RUNTIME` only if the bundled `python/` folder changes).
-2. `python tools/make_release.py app dist "release notes"`
-3. Create a GitHub release tagged `v<version>` with `update.json`, `fieldstitch-app-<version>.zip` and the full `FieldStitch-<version>-win64.zip`.
+1. Change code in `app/`, bump `__version__` in `app/fieldstitch/__init__.py`
+   (bump `RUNTIME` only if the bundled `python/` folder changes; those updates need the full package).
+2. `python tools/make_release.py "what changed"`
+3. Commit `app/` and `updates/`, push to `main`. Installed copies see it within a few minutes.

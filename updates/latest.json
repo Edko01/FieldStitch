@@ -1,0 +1,8 @@
+{
+ "version": "1.1.1",
+ "runtime": 1,
+ "app_zip": "updates/fieldstitch-app-1.1.1.zip",
+ "sha256": "72c89c9924d97c7a9472d24468fbd6b62f21cd6fde5ba72cefd1804612bcb724",
+ "notes": "- Updates now come straight from the Edko01/FieldStitch repo",
+ "date": "2026-10-27"
+}
