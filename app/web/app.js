@@ -71,7 +71,7 @@ async function refresh() {
   try {
     status = await api("/api/status");
   } catch (e) {
-    if (!updRestarting) toast("Lost contact with FieldStitch. Is its window still open?");
+    if (!updRestarting) toast("Lost contact with FieldStitch. Start it again from the Start menu or desktop icon.");
     schedule(4000);
     return;
   }

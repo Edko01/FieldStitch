@@ -182,10 +182,9 @@ for attempt in range(60):
         say("waiting for files to be released: %s" % e)
         time.sleep(1.0)
 say("swap " + ("done" if ok else "FAILED, kept the previous version"))
-py = os.path.join(root, "python", "python.exe")
-if not os.path.exists(py):
-    py = sys.executable
-cmd = [py, os.path.join(root, "app", "main.py"), "--no-browser"]
+pyw = os.path.join(root, "python", "pythonw.exe")
+py = pyw if os.path.exists(pyw) else sys.executable
+cmd = [py, os.path.join(root, "app", "main.py"), "--no-window"]
 
 def alive(port):
     import urllib.request
@@ -197,7 +196,7 @@ def alive(port):
 
 try:
     if sys.platform == "win32":
-        subprocess.Popen(cmd, cwd=root, creationflags=0x00000010)  # CREATE_NEW_CONSOLE
+        subprocess.Popen(cmd, cwd=root, creationflags=0x00000008 | 0x00000200)  # DETACHED, NEW_GROUP
     else:
         subprocess.Popen(cmd, cwd=root, start_new_session=True)
     say("restarted")
@@ -210,8 +209,8 @@ for _ in range(25):
         up = True
         break
 if not up:
-    # fallback: run without a console window, output to a log file
-    say("no answer on port %d, starting again without a console" % PORT)
+    # fallback: start again with output going to a log file
+    say("no answer on port %d, starting again" % PORT)
     out = open(os.path.join(root, "_update", "restart.log"), "w")
     flags = 0x08000000 if sys.platform == "win32" else 0
     subprocess.Popen(cmd, cwd=root, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,

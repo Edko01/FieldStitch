@@ -54,6 +54,7 @@ class State:
             self.cfg = {"recent": []}
         self.tile_local = threading.local()
         self.origin = None
+        self.last_seen = 0.0
 
     def save_cfg(self):
         save_json(self.cfg_path, self.cfg)
@@ -469,6 +470,7 @@ class Handler(BaseHTTPRequestHandler):
             path = u.path
             q = parse_qs(u.query)
             if path.startswith("/api/"):
+                S.last_seen = time.time()
                 return self._send(200, self.api_get(path, q))
             m = re.match(r"^/tiles/(\d+)/(-?\d+)/(-?\d+)\.png$", path)
             if m:
@@ -488,6 +490,8 @@ class Handler(BaseHTTPRequestHandler):
             ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
             if fp.endswith(".js"):
                 ctype = "text/javascript"
+            elif fp.endswith(".webmanifest"):
+                ctype = "application/manifest+json"
             with open(fp, "rb") as f:
                 return self._send(200, f.read(), ctype)
         except ApiError as e:
@@ -557,6 +561,13 @@ class Handler(BaseHTTPRequestHandler):
     def api_post(self, path, b):
         if path == "/api/browse":
             return {"path": browse(b.get("mode", "folder"), b.get("title", "Select"), b.get("initial", ""))}
+        if path == "/api/quit":
+            if S.dir and S.running():
+                if not b.get("force"):
+                    raise ApiError("Processing is running.")
+                cancel_processing()
+            threading.Timer(0.3, lambda: os._exit(0)).start()
+            return {}
         if path == "/api/update/install":
             busy = None
             if S.dir and S.running():
@@ -694,6 +705,30 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError("Unknown request")
 
 
+def lifetime_watch(srv, browser):
+    """Quit when the app window is gone and nothing is running."""
+    started = time.time()
+    while True:
+        time.sleep(5)
+        busy = (S.dir and S.running()) or (S.scan and not S.scan.get("finished")) \
+            or (S.export and not S.export.get("finished")) \
+            or updater.state.get("phase") in ("downloading", "installing", "restarting")
+        if busy:
+            continue
+        idle = time.time() - S.last_seen
+        if browser is not None and browser.poll() is None:
+            continue  # our app window is still open (possibly minimised)
+        if S.last_seen == 0:
+            if browser is not None and time.time() - started > 120:
+                break  # window closed before the page ever loaded
+            continue
+        limit = 20 if browser is not None else 180
+        if idle > limit:
+            break
+    print("No window open and nothing running - closing FieldStitch.")
+    os._exit(0)
+
+
 def serve(port=8765, open_browser=True):
     srv = None
     for p in range(port, port + 30):
@@ -709,10 +744,11 @@ def serve(port=8765, open_browser=True):
     updater.PORT[0] = port
     url = "http://127.0.0.1:%d/" % port
     print("FieldStitch %s is running at %s" % (__version__, url))
-    print("Keep this window open while you work. Close it to quit.")
+    browser = None
     if open_browser:
-        import webbrowser
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+        from .appwindow import open_window
+        browser = open_window(url)
+    threading.Thread(target=lifetime_watch, args=(srv, browser), daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
