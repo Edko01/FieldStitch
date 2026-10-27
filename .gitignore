@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+python/
+_update/
+dist/
+*.zip

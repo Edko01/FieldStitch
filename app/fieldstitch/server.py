@@ -1,0 +1,719 @@
+"""Local web server for the FieldStitch user interface (binds to 127.0.0.1 only)."""
+import json
+import math
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+import numpy as np
+
+from . import __version__, project as P, updater
+from .pipeline import load_project, save_json, safe_name
+
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEB_DIR = os.path.join(APP_DIR, "web")
+RUN_SCRIPT = os.path.join(APP_DIR, "run_pipeline.py")
+R0 = 64.0  # metres per screen pixel at zoom 0
+IS_WIN = sys.platform == "win32"
+
+
+def config_dir():
+    base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    d = os.path.join(base, "FieldStitch")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def default_projects_dir():
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    if not os.path.isdir(docs):
+        docs = os.path.expanduser("~")
+    return os.path.join(docs, "FieldStitch Projects")
+
+
+class State:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.dir = None
+        self.proj = None
+        self.proc = None
+        self.scan = None       # {"done", "total", "folder", "error"}
+        self.export = None     # {"done", "total", "current", "frac", "files", "errors", "out_dir"}
+        self.cfg_path = os.path.join(config_dir(), "config.json")
+        try:
+            with open(self.cfg_path, "r", encoding="utf-8") as f:
+                self.cfg = json.load(f)
+        except Exception:
+            self.cfg = {"recent": []}
+        self.tile_local = threading.local()
+        self.origin = None
+
+    def save_cfg(self):
+        save_json(self.cfg_path, self.cfg)
+
+    def remember(self, d):
+        rec = [r for r in self.cfg.get("recent", []) if os.path.normcase(r) != os.path.normcase(d)]
+        rec.insert(0, d)
+        self.cfg["recent"] = rec[:12]
+        self.save_cfg()
+
+    def save(self):
+        P.save(self.dir, self.proj)
+
+    # ------------------------------------------------------------ paths & origin
+    def outputs(self):
+        return os.path.join(self.dir, "outputs")
+
+    def report(self):
+        p = os.path.join(self.outputs(), "report.json")
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return None
+        return None
+
+    def ortho_path(self):
+        r = self.report()
+        if r:
+            p = os.path.join(self.outputs(), r.get("ortho", ""))
+            if os.path.exists(p):
+                return p
+        return None
+
+    def compute_origin(self):
+        """Fixed local origin (UTM metres) for the map frame."""
+        from .geo import Geo, utm_epsg
+        photos = [m for m in self.proj["photos"] if m.get("lat") is not None]
+        if not photos:
+            self.origin = None
+            return
+        if self.proj.get("map_origin"):
+            o = self.proj["map_origin"]
+            self.origin = (o["epsg"], o["e"], o["n"])
+            return
+        lon = float(np.median([m["lon"] for m in photos]))
+        lat = float(np.median([m["lat"] for m in photos]))
+        epsg = utm_epsg(lon, lat)
+        e, n = Geo(epsg).to_utm(lon, lat)
+        self.origin = (epsg, math.floor(e), math.floor(n))
+        self.proj["map_origin"] = {"epsg": epsg, "e": self.origin[1], "n": self.origin[2]}
+        self.save()
+
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+
+S = State()
+
+
+# ------------------------------------------------------------------- helpers
+def json_body(handler):
+    n = int(handler.headers.get("Content-Length") or 0)
+    if n == 0:
+        return {}
+    return json.loads(handler.rfile.read(n).decode("utf-8"))
+
+
+class ApiError(Exception):
+    pass
+
+
+def open_in_explorer(path):
+    if IS_WIN:
+        os.startfile(path)  # noqa
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+BROWSE_CODE = r'''
+import sys, tkinter as tk
+from tkinter import filedialog
+r = tk.Tk(); r.withdraw()
+try:
+    r.attributes("-topmost", True)
+except Exception:
+    pass
+mode, title, init = sys.argv[1], sys.argv[2], sys.argv[3]
+if mode == "folder":
+    p = filedialog.askdirectory(parent=r, title=title, initialdir=init or None, mustexist=True)
+else:
+    p = filedialog.askopenfilename(parent=r, title=title, initialdir=init or None,
+        filetypes=[("Field boundaries", "*.kml *.kmz *.shp *.geojson *.json"), ("All files", "*.*")])
+sys.stdout.write(p or "")
+'''
+
+
+def browse(mode, title, initial):
+    flags = 0x08000000 if IS_WIN else 0
+    out = subprocess.run([sys.executable, "-c", BROWSE_CODE, mode, title, initial or ""],
+                         capture_output=True, text=True, creationflags=flags, timeout=3600)
+    p = (out.stdout or "").strip()
+    return os.path.normpath(p) if p else ""
+
+
+# ---------------------------------------------------------------- project ops
+def project_summary():
+    if not S.proj:
+        return None
+    s = P.summarize(S.proj)
+    s.update({"name": S.proj["name"], "dir": S.dir, "folders": S.proj.get("folders", []),
+              "settings": S.proj["settings"], "has_result": S.ortho_path() is not None})
+    return s
+
+
+def open_project(d):
+    d = os.path.normpath(d)
+    if not os.path.exists(P.project_file(d)):
+        raise ApiError("No FieldStitch project in that folder.")
+    with S.lock:
+        if S.running():
+            raise ApiError("Processing is running. Cancel it before switching projects.")
+        S.dir = d
+        S.proj = P.load(d)
+        S.origin = None
+        S.compute_origin()
+        S.remember(d)
+        S.tile_local = threading.local()
+
+
+def scan_worker(folder, recursive):
+    try:
+        known = set(m["path"] for m in S.proj["photos"])
+
+        def prog(done, total):
+            S.scan.update(done=done, total=total)
+
+        metas, errors = P.scan_folder(folder, recursive, prog, known)
+        with S.lock:
+            S.proj["photos"].extend(metas)
+            S.proj["photos"].sort(key=lambda m: (m.get("time") or 0, m["path"]))
+            if folder not in S.proj["folders"]:
+                S.proj["folders"].append(folder)
+            S.proj["selection"] = None
+            S.proj.pop("map_origin", None)
+            S.compute_origin()
+            S.save()
+        S.scan.update(finished=True, added=len(metas), errors=len(errors),
+                      error_examples=[os.path.basename(e[0]) + ": " + e[1] for e in errors[:3]])
+    except Exception as e:
+        S.scan.update(finished=True, error=str(e))
+
+
+def photo_points():
+    if not S.proj or not S.origin:
+        return {"points": [], "origin": None}
+    from .geo import Geo
+    epsg, e0, n0 = S.origin
+    g = Geo(epsg)
+    photos = S.proj["photos"]
+    sel = set(S.proj["selection"]) if S.proj.get("selection") else None
+    ok = [i for i, m in enumerate(photos) if m.get("lat") is not None]
+    if not ok:
+        return {"points": [], "origin": [e0, n0, epsg]}
+    E, N = g.to_utm(np.array([photos[i]["lon"] for i in ok]), np.array([photos[i]["lat"] for i in ok]))
+    pts = []
+    maxob = S.proj["settings"].get("max_oblique_deg", 30)
+    for k, i in enumerate(ok):
+        m = photos[i]
+        obl = m.get("pitch") is not None and abs(m["pitch"] + 90) > maxob
+        pts.append([round(float(E[k] - e0), 2), round(float(N[k] - n0), 2), i,
+                    1 if (sel is None or i in sel) else 0, 1 if (m.get("rtk_flag") or 0) >= 50 else 0,
+                    1 if obl else 0])
+    return {"points": pts, "origin": [e0, n0, epsg]}
+
+
+def start_processing(settings):
+    with S.lock:
+        if S.running():
+            raise ApiError("Processing is already running.")
+        if not S.proj["photos"]:
+            raise ApiError("Add photos first.")
+        S.proj["settings"].update(settings or {})
+        S.save()
+        prog = os.path.join(S.dir, "progress.json")
+        save_json(prog, {"status": "starting", "stage": "", "overall": 0, "message": "Starting", "elapsed": 0})
+        logf = open(os.path.join(S.dir, "process_console.txt"), "w")
+        flags = 0x08000000 if IS_WIN else 0
+        kw = {}
+        if not IS_WIN:
+            kw["start_new_session"] = True
+        S.proc = subprocess.Popen([sys.executable, RUN_SCRIPT, S.dir], cwd=APP_DIR, stdout=logf,
+                                  stderr=subprocess.STDOUT, creationflags=flags, **kw)
+
+
+def cancel_processing():
+    with S.lock:
+        if not S.running():
+            return
+        pid = S.proc.pid
+        if IS_WIN:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
+                           creationflags=0x08000000)
+        else:
+            import signal
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except Exception:
+                S.proc.kill()
+        try:
+            S.proc.wait(10)
+        except Exception:
+            pass
+        p = os.path.join(S.dir, "progress.json")
+        try:
+            st = json.load(open(p))
+        except Exception:
+            st = {}
+        st.update(status="cancelled", message="Cancelled")
+        save_json(p, st)
+
+
+def progress_state():
+    if not S.dir:
+        return None
+    p = os.path.join(S.dir, "progress.json")
+    try:
+        with open(p, "r") as f:
+            st = json.load(f)
+    except Exception:
+        return None
+    if st.get("status") in ("running", "starting") and not S.running():
+        st["status"] = "error"
+        st["message"] = st.get("message") or "Processing stopped unexpectedly. See the log."
+    return st
+
+
+# --------------------------------------------------------------------- areas
+def areas_path():
+    return os.path.join(S.dir, "areas.json")
+
+
+def load_areas():
+    try:
+        with open(areas_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_areas(areas):
+    save_json(areas_path(), areas)
+
+
+def areas_for_client(areas):
+    from .export import area_stats
+    epsg, e0, n0 = S.origin
+    out = []
+    for a in areas:
+        rings = [[[round(p[0] - e0, 3), round(p[1] - n0, 3)] for p in r] for r in a["rings"]]
+        st = area_stats(a)
+        out.append({"id": a["id"], "name": a["name"], "kind": a.get("kind", ""), "rings": rings,
+                    "ha": float(st["ha"]), "ac": float(st["ac"])})
+    return out
+
+
+def areas_from_client(lst):
+    from .export import new_id
+    epsg, e0, n0 = S.origin
+    out = []
+    for a in lst:
+        rings = [[[p[0] + e0, p[1] + n0] for p in r] for r in a["rings"]]
+        for r in rings:
+            if r[0] != r[-1]:
+                r.append(list(r[0]))
+        out.append({"id": a.get("id") or new_id(), "name": a.get("name") or "Area", "kind": a.get("kind", "drawn"),
+                    "rings": rings})
+    return out
+
+
+def check_ortho_crs():
+    """Areas are stored in the ortho CRS; the map frame uses the same UTM zone."""
+    rep = S.report()
+    if rep and S.origin and rep.get("epsg") != S.origin[0]:
+        S.proj["map_origin"] = {"epsg": rep["epsg"], "e": S.origin[1], "n": S.origin[2]}
+        S.save()
+        S.compute_origin()
+
+
+def export_worker(ids, out_dir, compression):
+    from .export import export_area, safe_filename
+    try:
+        areas = [a for a in load_areas() if a["id"] in ids]
+        ortho = S.ortho_path()
+        S.export.update(total=len(areas))
+        os.makedirs(out_dir, exist_ok=True)
+        pname = safe_name(S.proj["name"])
+        used = set()
+        for k, a in enumerate(areas):
+            S.export.update(current=a["name"], done=k, frac=0)
+            base = "%s_%s" % (pname, safe_filename(a["name"]))
+            fn = base
+            c = 2
+            while fn.lower() in used:
+                fn = "%s_%d" % (base, c)
+                c += 1
+            used.add(fn.lower())
+            path = os.path.join(out_dir, fn + ".tif")
+            try:
+                export_area(ortho, a, path, compression=compression,
+                            jpeg_quality=S.proj["settings"].get("jpeg_quality", 90),
+                            progress=lambda f: S.export.update(frac=f))
+                S.export["files"].append(path)
+            except Exception as e:
+                S.export["errors"].append("%s: %s" % (a["name"], e))
+        S.export.update(done=len(areas), finished=True, current="")
+    except Exception as e:
+        S.export.update(finished=True, error=str(e))
+
+
+# ---------------------------------------------------------------------- tiles
+def tile_png(z, x, y):
+    import cv2
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+    path = S.ortho_path()
+    if not path or not S.origin:
+        return None
+    loc = S.tile_local
+    mt = os.path.getmtime(path)
+    if getattr(loc, "path", None) != path or getattr(loc, "mtime", None) != mt:
+        if getattr(loc, "ds", None) is not None:
+            loc.ds.close()
+        loc.ds = rasterio.open(path)
+        loc.path, loc.mtime = path, mt
+    ds = loc.ds
+    _, e0, n0 = S.origin
+    s = R0 / (2 ** z)
+    te0 = e0 + x * 256 * s
+    tn1 = n0 - y * 256 * s
+    te1 = te0 + 256 * s
+    tn0 = tn1 - 256 * s
+    b = ds.bounds
+    ie0, ie1 = max(te0, b.left), min(te1, b.right)
+    in0, in1 = max(tn0, b.bottom), min(tn1, b.top)
+    if ie1 <= ie0 or in1 <= in0:
+        return None
+    # destination rectangle inside the tile
+    dx0 = int(round((ie0 - te0) / s))
+    dx1 = int(round((ie1 - te0) / s))
+    dy0 = int(round((tn1 - in1) / s))
+    dy1 = int(round((tn1 - in0) / s))
+    w, h = dx1 - dx0, dy1 - dy0
+    if w <= 0 or h <= 0:
+        return None
+    gsd = ds.res[0]
+    col0 = (ie0 - b.left) / gsd
+    row0 = (b.top - in1) / gsd
+    win = Window(col0, row0, (ie1 - ie0) / gsd, (in1 - in0) / gsd)
+    rgb = ds.read([1, 2, 3], window=win, out_shape=(3, h, w), resampling=Resampling.bilinear)
+    m = ds.read_masks(1, window=win, out_shape=(h, w), resampling=Resampling.nearest)
+    tile = np.zeros((256, 256, 4), np.uint8)
+    tile[dy0:dy1, dx0:dx1, 0] = rgb[2]
+    tile[dy0:dy1, dx0:dx1, 1] = rgb[1]
+    tile[dy0:dy1, dx0:dx1, 2] = rgb[0]
+    tile[dy0:dy1, dx0:dx1, 3] = m
+    if not tile[..., 3].any():
+        return None
+    ok, enc = cv2.imencode(".png", tile, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+    return enc.tobytes()
+
+
+def _empty_png():
+    import zlib, struct
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\x00\x00\x00\x00\x00")) + chunk(b"IEND", b"")
+
+
+EMPTY_PNG = _empty_png()
+
+
+# -------------------------------------------------------------------- handler
+class Handler(BaseHTTPRequestHandler):
+    server_version = "FieldStitch/" + __version__
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json", headers=None):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode("utf-8")
+        elif isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store" if ctype == "application/json" else "max-age=60")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        try:
+            u = urlparse(self.path)
+            path = u.path
+            q = parse_qs(u.query)
+            if path.startswith("/api/"):
+                return self._send(200, self.api_get(path, q))
+            m = re.match(r"^/tiles/(\d+)/(-?\d+)/(-?\d+)\.png$", path)
+            if m:
+                data = tile_png(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                return self._send(200, data or EMPTY_PNG, "image/png")
+            if path == "/preview.png":
+                p = os.path.join(S.outputs(), "preview.png") if S.dir else None
+                if p and os.path.exists(p):
+                    with open(p, "rb") as f:
+                        return self._send(200, f.read(), "image/png")
+                return self._send(404, b"", "text/plain")
+            if path in ("/", ""):
+                path = "/index.html"
+            fp = os.path.normpath(os.path.join(WEB_DIR, path.lstrip("/")))
+            if not fp.startswith(WEB_DIR) or not os.path.isfile(fp):
+                return self._send(404, "Not found", "text/plain")
+            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            if fp.endswith(".js"):
+                ctype = "text/javascript"
+            with open(fp, "rb") as f:
+                return self._send(200, f.read(), ctype)
+        except ApiError as e:
+            self._send(400, {"error": str(e)})
+        except Exception as e:
+            traceback.print_exc()
+            self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
+
+    def do_POST(self):
+        try:
+            u = urlparse(self.path)
+            body = json_body(self)
+            self._send(200, self.api_post(u.path, body) or {"ok": True})
+        except ApiError as e:
+            self._send(400, {"error": str(e)})
+        except Exception as e:
+            traceback.print_exc()
+            self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
+
+    # ------------------------------------------------------------------ GET
+    def api_get(self, path, q):
+        if path == "/api/status":
+            return {"version": __version__, "project": project_summary(),
+                    "recent": [r for r in S.cfg.get("recent", []) if os.path.exists(P.project_file(r))],
+                    "default_dir": S.cfg.get("projects_dir") or default_projects_dir(),
+                    "running": S.running() if S.dir else False, "progress": progress_state(),
+                    "scan": S.scan, "export": S.export, "platform": sys.platform,
+                    "update": dict(updater.state)}
+        if path == "/api/update/check":
+            info = updater.check()
+            info.pop("_download", None)
+            return info
+        if not S.proj:
+            raise ApiError("No project is open.")
+        if path == "/api/photos":
+            return photo_points()
+        if path == "/api/log":
+            p = os.path.join(S.dir, "log.txt")
+            if not os.path.exists(p):
+                return {"lines": []}
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            return {"lines": lines[-int(q.get("tail", ["300"])[0]):]}
+        if path == "/api/result":
+            rep = S.report()
+            op = S.ortho_path()
+            if not rep or not op:
+                return {"ready": False}
+            check_ortho_crs()
+            import rasterio
+            with rasterio.open(op) as ds:
+                b = ds.bounds
+                gsd = ds.res[0]
+            _, e0, n0 = S.origin
+            maxz = int(math.ceil(math.log2(R0 / gsd)))
+            rep = dict(rep)
+            cams = rep.pop("cam_positions", [])
+            return {"ready": True, "report": rep, "ortho_path": op, "outputs_dir": S.outputs(),
+                    "bounds": [b.left - e0, b.bottom - n0, b.right - e0, b.top - n0], "max_native_zoom": maxz,
+                    "cams": [[round(c[0] - e0, 2), round(c[1] - n0, 2)] for c in cams],
+                    "mtime": os.path.getmtime(op), "r0": R0}
+        if path == "/api/areas":
+            return {"areas": areas_for_client(load_areas())}
+        raise ApiError("Unknown request")
+
+    # ----------------------------------------------------------------- POST
+    def api_post(self, path, b):
+        if path == "/api/browse":
+            return {"path": browse(b.get("mode", "folder"), b.get("title", "Select"), b.get("initial", ""))}
+        if path == "/api/update/install":
+            busy = None
+            if S.dir and S.running():
+                busy = "Processing is running. Let it finish or cancel it before updating."
+            elif S.export and not S.export.get("finished"):
+                busy = "An export is running. Wait for it to finish before updating."
+            elif S.scan and not S.scan.get("finished"):
+                busy = "Photos are still being read. Wait a moment before updating."
+            try:
+                info = updater.install(busy)
+            except RuntimeError as e:
+                raise ApiError(str(e))
+            return {"version": info["latest"]}
+        if path == "/api/project/new":
+            name = (b.get("name") or "").strip()
+            if not name:
+                raise ApiError("Enter a project name.")
+            parent = b.get("parent") or default_projects_dir()
+            d = os.path.join(parent, safe_name(name))
+            if os.path.exists(P.project_file(d)):
+                raise ApiError("A project with that name already exists in %s." % parent)
+            P.create_project(d, name)
+            S.cfg["projects_dir"] = parent
+            open_project(d)
+            return {"dir": d}
+        if path == "/api/project/open":
+            open_project(b.get("dir", ""))
+            return {"dir": S.dir}
+        if path == "/api/project/close":
+            if S.running():
+                raise ApiError("Processing is running.")
+            S.dir = S.proj = None
+            S.scan = S.export = None
+            return {}
+        if path == "/api/open_path":
+            p = b.get("path") or (S.dir if S.dir else "")
+            if p and os.path.exists(p):
+                open_in_explorer(p)
+            return {}
+        if not S.proj:
+            raise ApiError("No project is open.")
+        if path == "/api/photos/add":
+            folder = os.path.normpath(b.get("folder") or "")
+            if not os.path.isdir(folder):
+                raise ApiError("Folder not found: %s" % folder)
+            if S.running():
+                raise ApiError("Processing is running.")
+            if S.scan and not S.scan.get("finished"):
+                raise ApiError("Already reading photos.")
+            S.scan = {"done": 0, "total": 0, "folder": folder, "finished": False}
+            threading.Thread(target=scan_worker, args=(folder, b.get("recursive", True)), daemon=True).start()
+            return {}
+        if path == "/api/photos/remove_folder":
+            folder = b.get("folder")
+            nf = os.path.normcase(os.path.normpath(folder))
+            S.proj["photos"] = [m for m in S.proj["photos"]
+                                if not os.path.normcase(os.path.normpath(m["path"])).startswith(nf + os.sep)
+                                and os.path.normcase(os.path.dirname(m["path"])) != nf]
+            S.proj["folders"] = [f for f in S.proj["folders"] if f != folder]
+            S.proj["selection"] = None
+            S.proj.pop("map_origin", None)
+            S.compute_origin()
+            S.save()
+            return {}
+        if path == "/api/photos/select":
+            if b.get("clear"):
+                S.proj["selection"] = None
+            else:
+                ids = b.get("ids") or []
+                S.proj["selection"] = sorted(set(int(i) for i in ids)) or None
+            S.save()
+            return {}
+        if path == "/api/settings":
+            S.proj["settings"].update(b)
+            S.save()
+            return {}
+        if path == "/api/rename":
+            S.proj["name"] = (b.get("name") or S.proj["name"]).strip()
+            S.save()
+            return {}
+        if path == "/api/process/start":
+            start_processing(b.get("settings"))
+            return {}
+        if path == "/api/process/cancel":
+            cancel_processing()
+            return {}
+        if path == "/api/areas":
+            save_areas(areas_from_client(b.get("areas", [])))
+            return {"areas": areas_for_client(load_areas())}
+        if path == "/api/areas/import":
+            from .export import read_boundaries, to_ortho_crs
+            p = b.get("path") or ""
+            if not os.path.isfile(p):
+                raise ApiError("File not found: %s" % p)
+            bnds, crs = read_boundaries(p)
+            if not bnds:
+                raise ApiError("No polygons found in that file.")
+            new = to_ortho_crs(bnds, crs, S.origin[0])
+            areas = load_areas() + new
+            save_areas(areas)
+            return {"areas": areas_for_client(areas), "added": len(new)}
+        if path == "/api/areas/grid":
+            from .export import grid_areas
+            op = S.ortho_path()
+            if not op:
+                raise ApiError("Process the photos first.")
+            new = grid_areas(op, b.get("mode", "size"), float(b.get("size_m") or 250), int(b.get("rows") or 2),
+                             int(b.get("cols") or 2), b.get("prefix") or "Grid")
+            areas = load_areas() + new
+            save_areas(areas)
+            return {"areas": areas_for_client(areas), "added": len(new)}
+        if path == "/api/areas/kml":
+            from .export import areas_to_kml
+            areas = [a for a in load_areas() if not b.get("ids") or a["id"] in b["ids"]]
+            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
+            os.makedirs(out_dir, exist_ok=True)
+            p = os.path.join(out_dir, "%s_areas.kml" % safe_name(S.proj["name"]))
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(areas_to_kml(areas, S.origin[0]))
+            return {"path": p}
+        if path == "/api/export":
+            if not S.ortho_path():
+                raise ApiError("Process the photos first.")
+            if S.export and not S.export.get("finished"):
+                raise ApiError("An export is already running.")
+            ids = b.get("ids") or []
+            if not ids:
+                raise ApiError("Choose at least one area to export.")
+            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
+            S.export = {"done": 0, "total": len(ids), "current": "", "frac": 0, "files": [], "errors": [],
+                        "out_dir": out_dir, "finished": False}
+            threading.Thread(target=export_worker, args=(ids, out_dir, b.get("compression", "same")),
+                             daemon=True).start()
+            return {}
+        raise ApiError("Unknown request")
+
+
+def serve(port=8765, open_browser=True):
+    srv = None
+    for p in range(port, port + 30):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", p), Handler)
+            port = p
+            break
+        except OSError:
+            continue
+    if srv is None:
+        raise SystemExit("Could not find a free local port.")
+    srv.daemon_threads = True
+    updater.PORT[0] = port
+    url = "http://127.0.0.1:%d/" % port
+    print("FieldStitch %s is running at %s" % (__version__, url))
+    print("Keep this window open while you work. Close it to quit.")
+    if open_browser:
+        import webbrowser
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

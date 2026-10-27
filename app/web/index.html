@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FieldStitch</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2322302A'/%3E%3Cpath d='M9 7v18M16 25V7M23 7v18M9 7h7M16 25h7' fill='none' stroke='%23E9B20F' stroke-width='2.6' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#22302A"/><path d="M9 7v18M16 25V7M23 7v18M9 7h7M16 25h7" fill="none" stroke="#E9B20F" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>FieldStitch</div>
+  <div class="proj-title" id="projTitle" hidden>
+    <button class="linkish" id="projName" title="Rename project"></button>
+    <span class="proj-dir" id="projDir"></span>
+  </div>
+  <div class="topright">
+    <div class="topbar-actions" id="topActions" hidden>
+      <button class="ghost" id="btnOpenFolder">Open project folder</button>
+      <button class="ghost" id="btnClose">Close project</button>
+    </div>
+    <button class="ghost" id="btnUpdate" title="Check GitHub for a newer version">Check for updates<i class="dot" id="updDot" hidden></i></button>
+  </div>
+</header>
+
+<dialog class="upd" id="updDlg" aria-labelledby="updTitle">
+  <h2 id="updTitle">Updates</h2>
+  <p id="updMsg"></p>
+  <pre class="notes" id="updNotes" hidden></pre>
+  <div class="bar" id="updBarWrap" hidden><i id="updBar"></i></div>
+  <p class="form-error" id="updErr" role="alert"></p>
+  <div class="btnrow end">
+    <button class="ghost" id="updClose">Close</button>
+    <a class="primary btnlink" id="updFull" target="_blank" rel="noopener" hidden>Download full package</a>
+    <button class="primary" id="updInstall" hidden>Install and restart</button>
+  </div>
+</dialog>
+
+<main class="shell">
+  <!-- Welcome -->
+  <section class="welcome" id="welcome" hidden>
+    <div class="welcome-inner">
+      <h1>Turn a day of mapping photos into field orthos.</h1>
+      <p class="lede">Everything runs on this computer. No internet connection is needed.</p>
+      <div class="welcome-grid">
+        <form class="panel" id="newForm">
+          <h2>New project</h2>
+          <label>Project name<input id="newName" required placeholder="e.g. Hidalgo North 40 – Oct 27"></label>
+          <label>Save projects in
+            <span class="pathrow"><input id="newParent"><button type="button" class="ghost" id="newBrowse">Browse…</button></span>
+          </label>
+          <button class="primary" type="submit">Create project</button>
+          <p class="form-error" id="newErr" role="alert"></p>
+        </form>
+        <div class="panel">
+          <h2>Open a project</h2>
+          <ul class="recent" id="recentList"></ul>
+          <button class="ghost" id="openOther">Open another project folder…</button>
+          <p class="form-error" id="openErr" role="alert"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Workspace -->
+  <aside class="rail" id="rail" hidden>
+    <section class="step" id="stepPhotos">
+      <h2><span class="num">1</span>Photos</h2>
+      <ul class="folders" id="folderList"></ul>
+      <div class="addfolder">
+        <span class="pathrow"><input id="folderPath" placeholder="Paste a folder path, or browse"><button class="ghost" id="folderBrowse">Browse…</button></span>
+        <label class="check"><input type="checkbox" id="folderRecursive" checked> Include subfolders</label>
+        <button class="secondary" id="folderAdd">Add photos</button>
+        <div class="scan" id="scanBox" hidden><div class="bar"><i id="scanBar"></i></div><span id="scanText"></span></div>
+        <p class="form-error" id="photoErr" role="alert"></p>
+      </div>
+      <dl class="facts" id="photoFacts"></dl>
+      <div class="selection" id="selectionBox" hidden>
+        <p id="selText"></p>
+        <div class="btnrow">
+          <button class="ghost small" id="btnSelectArea" title="Drag a box on the map around the photos to process">Pick photos on map</button>
+          <button class="ghost small" id="btnSelectAll">Use all photos</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="step" id="stepProcess">
+      <h2><span class="num">2</span>Process</h2>
+      <fieldset class="seg" id="presetSeg">
+        <legend>Quality</legend>
+        <label><input type="radio" name="preset" value="fast"><span>Fast</span></label>
+        <label><input type="radio" name="preset" value="balanced"><span>Balanced</span></label>
+        <label><input type="radio" name="preset" value="accurate"><span>Accurate</span></label>
+      </fieldset>
+      <p class="hint" id="presetHint"></p>
+      <details class="more">
+        <summary>Output options</summary>
+        <label>Resolution
+          <span class="pathrow"><select id="resMode"><option value="auto">Automatic</option><option value="custom">Custom</option></select>
+          <input id="resCm" type="number" min="0.5" step="0.1" placeholder="cm/pixel" hidden></span>
+        </label>
+        <fieldset class="seg two" id="surfaceSeg">
+          <legend>Surface</legend>
+          <label><input type="radio" name="surface" value="fields"><span>Fields</span></label>
+          <label><input type="radio" name="surface" value="detailed"><span>Trees &amp; buildings</span></label>
+        </fieldset>
+        <fieldset class="seg two" id="compSeg">
+          <legend>File type</legend>
+          <label><input type="radio" name="compression" value="jpeg"><span>Compact (JPEG)</span></label>
+          <label><input type="radio" name="compression" value="deflate"><span>Lossless</span></label>
+        </fieldset>
+        <label class="check"><input type="checkbox" id="optExposure"> Even out exposure between photos</label>
+        <label class="check"><input type="checkbox" id="optTrim"> Trim ragged outer edges</label>
+      </details>
+      <button class="primary wide" id="btnStart">Start processing</button>
+      <div class="run" id="runBox" hidden>
+        <ol class="stages" id="stageList">
+          <li data-stage="features">Find features</li>
+          <li data-stage="matching">Match overlapping photos</li>
+          <li data-stage="alignment">Align cameras</li>
+          <li data-stage="surface">Build surface</li>
+          <li data-stage="ortho">Render orthomosaic</li>
+        </ol>
+        <div class="bar big"><i id="runBar"></i></div>
+        <p class="runmsg"><span id="runMsg"></span><span id="runTime"></span></p>
+        <div class="btnrow">
+          <button class="ghost small" id="btnCancel">Cancel</button>
+          <button class="ghost small" id="btnLog">Show log</button>
+        </div>
+      </div>
+      <p class="form-error" id="procErr" role="alert"></p>
+      <div class="result" id="resultBox" hidden>
+        <dl class="facts" id="resultFacts"></dl>
+        <div class="btnrow">
+          <button class="ghost small" id="btnOutputs">Open outputs folder</button>
+          <button class="ghost small" id="btnLog2">Show log</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="step" id="stepAreas">
+      <h2><span class="num">3</span>Areas &amp; export</h2>
+      <p class="hint" id="areasLocked">Areas become available once the orthomosaic is ready.</p>
+      <div id="areasTools" hidden>
+        <div class="toolgrid">
+          <button class="tool" id="toolRect" aria-pressed="false"><svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12"/></svg>Rectangle</button>
+          <button class="tool" id="toolPoly" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M3 15 6 4l9 2 2 9z"/></svg>Polygon</button>
+          <button class="tool" id="toolGrid" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M3 3h14v14H3zM10 3v14M3 10h14"/></svg>Grid</button>
+          <button class="tool" id="toolImport"><svg viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M3 17h14"/></svg>Import</button>
+        </div>
+        <p class="hint" id="toolHint"></p>
+        <form class="gridform" id="gridForm" hidden>
+          <fieldset class="seg two">
+            <legend>Split by</legend>
+            <label><input type="radio" name="gridmode" value="size" checked><span>Tile size</span></label>
+            <label><input type="radio" name="gridmode" value="count"><span>Rows × columns</span></label>
+          </fieldset>
+          <div class="gridsize"><input id="gridSize" type="number" min="10" value="1000"><select id="gridUnit"><option value="ft">ft</option><option value="m">m</option></select></div>
+          <div class="gridcount" hidden><input id="gridRows" type="number" min="1" value="2"> × <input id="gridCols" type="number" min="1" value="2"></div>
+          <button class="secondary" type="submit">Add grid areas</button>
+        </form>
+        <div class="arealist-head" id="areaHead" hidden>
+          <label class="check"><input type="checkbox" id="areaAll"> All</label>
+          <button class="linkish small" id="areaClear">Remove all</button>
+        </div>
+        <ul class="arealist" id="areaList"></ul>
+        <div class="exportbox" id="exportBox" hidden>
+          <label>Save to
+            <span class="pathrow"><input id="exportDir"><button class="ghost" id="exportBrowse">Browse…</button></span>
+          </label>
+          <select id="exportComp" aria-label="File type"><option value="same">Same file type as the mosaic</option><option value="jpeg">Compact (JPEG)</option><option value="deflate">Lossless</option></select>
+          <button class="primary wide" id="btnExport">Export</button>
+          <button class="linkish small" id="btnKml">Save area outlines as KML</button>
+          <div class="scan" id="exportProg" hidden><div class="bar"><i id="exportBar"></i></div><span id="exportText"></span></div>
+          <p class="form-error" id="exportErr" role="alert"></p>
+        </div>
+      </div>
+    </section>
+  </aside>
+
+  <section class="mapwrap" id="mapwrap" hidden>
+    <div id="map"></div>
+    <div class="mapempty" id="mapEmpty">Add a folder of drone photos to see where they were taken.</div>
+    <div class="legend" id="legend" hidden></div>
+    <div class="maptools">
+      <button class="mapbtn" id="btnFit" title="Zoom to job">Zoom to job</button>
+      <label class="mapbtn check"><input type="checkbox" id="showCams" checked> Photo positions</label>
+    </div>
+    <div class="logdrawer" id="logDrawer" hidden>
+      <div class="loghead"><strong>Processing log</strong><button class="ghost small" id="logClose">Close</button></div>
+      <pre id="logText"></pre>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
