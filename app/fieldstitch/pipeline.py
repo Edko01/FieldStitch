@@ -361,11 +361,13 @@ def _run(project_dir, prog):
     from .matching import init_worker, match_pair
     # quick sanity check of gimbal yaw on consecutive pairs (no prior filter)
     use_gimbal = has_gimbal.copy()
+    yaw_offset = 0.0
     if has_gimbal.sum() >= 3:
         ctx["use_prior"] = False
         with open(ctx_file, "wb") as f:
             pickle.dump(ctx, f)
-        test_pairs = [p for p in pairs if p[1] - p[0] == 1][:: max(1, len(pairs) // 60)][:40]
+        cons = [p for p in pairs if p[1] - p[0] == 1]
+        test_pairs = cons[:: max(1, len(cons) // 40)][:40]
         init_worker(ctx_file)
         sims = []
         for p in test_pairs:
@@ -379,12 +381,22 @@ def _run(project_dir, prog):
         gy = np.array([(m["yaw"] or 0) + conv for m in meta])
         both = np.isfinite(yaw_est) & has_gimbal
         if both.sum() >= 3:
-            dif = np.abs(angdiff(yaw_est[both], gy[both]))
-            med = float(np.median(dif))
-            log("Gimbal heading check: median difference %.1f deg over %d photos" % (med, both.sum()))
-            if med > 10:
+            d = angdiff(yaw_est[both], gy[both])
+            rad = np.radians(d)
+            mean = math.degrees(math.atan2(np.mean(np.sin(rad)), np.mean(np.cos(rad))))
+            spread = float(np.median(np.abs(angdiff(d, mean))))
+            log("Gimbal heading check: offset %.1f deg, spread %.1f deg over %d photos" % (mean, spread, both.sum()))
+            if spread > 10:
                 log("WARNING: gimbal headings disagree with image motion - ignoring gimbal angles")
                 use_gimbal[:] = False
+            elif abs(mean) > 5:
+                snap = round(mean / 90.0) * 90.0
+                yaw_offset = snap if abs(mean - snap) < 10 else mean
+                log("Gimbal headings are consistently %.0f deg off from the photos - correcting" % yaw_offset)
+                R_gimbal = np.array([rot_from_ypr((m["yaw"] or 0) + conv + yaw_offset, m["pitch"] or -90,
+                                                  m.get("roll") or 0) if has_gimbal[i] else np.eye(3)
+                                     for i, m in enumerate(meta)])
+                ctx["R"] = R_gimbal
     ctx["has_rot"] = use_gimbal
     ctx["use_prior"] = True
     with open(ctx_file, "wb") as f:
@@ -422,13 +434,15 @@ def _run(project_dir, prog):
     tid, timg, tfeat, ntr = build_tracks(match_res, nfeats, n)
     log("Tracks: %d (%d observations)" % (ntr, len(tid)))
     from .matching import load_features
-    fxy = [load_features(feat_dir, i, W[i], H[i])[0] for i in range(n)]
+    from .matching import load_xy
     uv_all = np.zeros((len(tid), 2))
+    o_img = np.argsort(timg, kind="stable")
+    bounds_i = np.searchsorted(timg[o_img], np.arange(n + 1))
     for i in range(n):
-        m = timg == i
-        if m.any():
-            uv_all[m] = fxy[i][tfeat[m]]
-    del fxy
+        idx = o_img[bounds_i[i]:bounds_i[i + 1]]
+        if len(idx):
+            uv_all[idx] = load_xy(feat_dir, i, W[i], H[i])[tfeat[idx]]
+    del o_img
 
     # initial rotations
     R0 = R_gimbal.copy()
@@ -626,6 +640,8 @@ def _run(project_dir, prog):
         "photos_aligned": int(aligned.sum()),
         "skipped": skipped,
         "rtk_photos": int(rtk.sum()),
+        "gimbal_yaw_offset_deg": round(float(yaw_offset), 1),
+        "gimbal_used": bool(use_gimbal.any()),
         "reprojection_rms_px": round(rms, 3),
         "seam_check": seam,
         "sparse_points": int(len(X)),

@@ -33,6 +33,16 @@ def load_features(feat_dir, i, W, H):
     return xy, d["desc"]
 
 
+def load_xy(feat_dir, i, W, H):
+    """Keypoint coordinates only (full-resolution pixels), without reading descriptors."""
+    with np.load(os.path.join(feat_dir, "%d.npz" % i)) as d:
+        xy = d["xy"].astype(np.float64)
+        if len(xy):
+            rw, rh = d["red_wh"]
+            xy = (xy + 0.5) * np.array([W / float(rw), H / float(rh)]) - 0.5
+    return xy
+
+
 def _get(i):
     if i in _CACHE:
         _CACHE.move_to_end(i)

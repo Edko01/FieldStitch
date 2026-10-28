@@ -1,8 +1,8 @@
 {
- "version": "1.2.1",
+ "version": "1.2.2",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.1.zip",
- "sha256": "f52285a3460f912878e721dcf8f365027f4e8d6a20f2e76e8cfade356779ef68",
- "notes": "- Every job now records a timing breakdown and your PC's hardware in the log and report\n- New Save diagnostics button: one small file with the log and timings to send for support or speed tuning",
+ "app_zip": "updates/fieldstitch-app-1.2.2.zip",
+ "sha256": "9e312def03e1a46811d32c4b97e7cfc9a4b318656e1348887a0a3157f4f23da3",
+ "notes": "- Corrects a consistent gimbal heading offset (e.g. Matrice 4E headings recorded 180 deg off) instead of discarding the gimbal angles, which keeps matching robust\n- Much faster track building on very large jobs (thousands of photos)\n- Includes 1.2.1: timing breakdown and Save diagnostics",
  "date": "2026-10-27"
 }
