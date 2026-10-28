@@ -23,7 +23,8 @@ PRESETS = {
 
 DEFAULT_SETTINGS = {
     "preset": "balanced",
-    "resolution_cm": None,      # None = automatic from preset
+    "resolution_cm": None,      # explicit output resolution (overrides res_factor)
+    "res_factor": 1.0,          # output pixel size relative to the photos' own (1 = full resolution)
     "surface": "fields",        # fields | detailed
     "exposure_balance": True,
     "compression": "jpeg",      # jpeg | deflate
@@ -110,10 +111,20 @@ class Progress:
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
+    def use_estimate(self, stage_seconds):
+        """Weight the progress bar by the expected time of each stage so the bar (and the
+        time-left figure) move evenly instead of racing through cheap stages."""
+        tot = float(sum(stage_seconds.get(n, 0) for n, _ in STAGES))
+        if tot <= 0:
+            return
+        self.weights = [(n, max(0.01, stage_seconds.get(n, 0) / tot)) for n, _ in STAGES]
+        norm = sum(w for _, w in self.weights)
+        self.weights = [(n, w / norm) for n, w in self.weights]
+
     def set(self, stage, frac, message=None, force=False):
         offset = 0.0
         weight = 0.0
-        for name, w in STAGES:
+        for name, w in getattr(self, "weights", STAGES):
             if name == stage:
                 weight = w
                 break
@@ -364,6 +375,17 @@ def _run(project_dir, prog):
     T.lap("setup")
     prog.set("features", 0, "Detecting features in %d photos" % n, force=True)
     log("Features: %d to compute (%d cached), %d workers" % (len(tasks), n - len(tasks), nworkers))
+    est_s = None
+    try:
+        from .estimate import estimate as _estimate
+        est = _estimate(proj, settings, cached_features=n - len(tasks), workers=nworkers)
+        if est.get("ok"):
+            est_s = est["seconds"]
+            prog.use_estimate(est["stages"])
+            log("Estimate before processing: about %.0f min, %.0f Mpx, %.1f GB" %
+                (est_s / 60.0, est["mpx"], est["size_bytes"] / 1e9))
+    except Exception as e:
+        log("estimate skipped: %s" % e)
     from .features import extract
     newkey = {str(i): [m["path"], feat_key] + list(old.get(str(i), []))[2:3] for i, m in enumerate(meta)}
     if tasks:
@@ -627,6 +649,8 @@ def _run(project_dir, prog):
     gsd_native = float(np.median(agl[ia] / rec.intr[cam_group[ia], 0]))
     if settings.get("resolution_cm"):
         gsd = float(settings["resolution_cm"]) / 100.0
+    elif settings.get("res_factor"):
+        gsd = gsd_native * float(settings["res_factor"])
     else:
         gsd = gsd_native * preset["res_factor"]
     gsd = max(gsd, gsd_native * 0.5)
@@ -761,6 +785,12 @@ def _run(project_dir, prog):
     T.lap("report")
     T.summary(log)
     report["timing"] = T.as_dict()
+    report["estimated_seconds"] = est_s
+    try:
+        from .estimate import record_actual
+        record_actual(est_s, time.time() - t_start)
+    except Exception:
+        pass
     report["system"] = sysd
     report["workers"] = nworkers
     save_json(os.path.join(out_dir, "report.json"), report)

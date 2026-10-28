@@ -3,28 +3,29 @@
 
 const $ = (id) => document.getElementById(id);
 const R0 = 64;
-const PRESET_HINTS = {
-  fast: "Quickest. Output at half the photo resolution, good for scouting and same-day checks.",
-  balanced: "Full-resolution output with quick alignment. The everyday choice for field maps.",
-  accurate: "Finer feature matching for the tightest seams. Takes roughly twice as long.",
-};
 const STAGES = ["features", "matching", "alignment", "surface", "ortho"];
+const STAGE_LABEL = { features: "Finding features", matching: "Matching photos", alignment: "Aligning cameras", surface: "Building surface", ortho: "Rendering orthomosaic" };
+// resolution slider: output pixel size as a multiple of the photos' own (left = low, right = full)
+const RES_STEPS = [4, 3, 2.5, 2, 1.5, 1.25, 1];
+const PRESET_RES = { fast: 2, balanced: 1, accurate: 1 };
 
 let status = null;
 let photos = null;
 let result = null;
 let areas = [];
-let checked = new Set();
 let map = null;
 let layers = {};
 let tool = null;
 let draw = null;
 let pollTimer = null;
-let lastProjectDir = null;
+let lastProjectDir = undefined;
 let lastResultMtime = null;
 let lastProgressStatus = null;
 let scanWasRunning = false;
 let exportWasRunning = false;
+let lastScan = null;
+let panel = "import";
+let nativeGsdCm = null;
 
 // ------------------------------------------------------------------ utils
 async function api(path, body) {
@@ -51,6 +52,20 @@ function fmtTime(s) {
   if (m < 60) return m + " min " + (s % 60) + " s";
   return Math.floor(m / 60) + " h " + (m % 60) + " min";
 }
+function fmtDur(s) {
+  if (s == null || !isFinite(s)) return "–";
+  const m = Math.max(1, Math.round(s / 60));
+  if (m < 60) return "≈ " + m + " min";
+  return "≈ " + Math.floor(m / 60) + " h " + (m % 60 ? (m % 60) + " min" : "");
+}
+function fmtBytes(b) {
+  if (b == null || !isFinite(b)) return "–";
+  if (b >= 1e9) return fmt(b / 1e9, b >= 1e10 ? 0 : 1) + " GB";
+  if (b >= 1e6) return fmt(b / 1e6, 0) + " MB";
+  return fmt(Math.max(b / 1e3, 1), 0) + " KB";
+}
+const cmIn = (cm) => fmt(cm, cm < 10 ? 1 : 0) + " cm (" + fmt(cm / 2.54, 2) + " in) per pixel";
+const acHa = (ha) => fmt(ha * 2.47105, ha * 2.47105 < 10 ? 1 : 0) + " ac (" + fmt(ha, 1) + " ha)";
 function sep() { return status && status.platform === "win32" ? "\\" : "/"; }
 function setErr(id, msg) { $(id).textContent = msg || ""; }
 function facts(el, rows) {
@@ -65,6 +80,8 @@ function facts(el, rows) {
     el.append(dt, dd);
   }
 }
+const busyScan = () => status && status.scan && !status.scan.finished;
+const busyExport = () => status && status.export && !status.export.finished;
 
 // ------------------------------------------------------------------ polling
 async function refresh() {
@@ -76,7 +93,7 @@ async function refresh() {
     return;
   }
   render();
-  const busy = status.running || (status.scan && !status.scan.finished) || (status.export && !status.export.finished);
+  const busy = status.running || busyScan() || busyExport();
   schedule(busy ? 1000 : 3000);
 }
 function schedule(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(refresh, ms); }
@@ -84,60 +101,79 @@ function schedule(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(refresh,
 // ------------------------------------------------------------------ render
 function render() {
   const p = status.project;
-  $("welcome").hidden = !!p;
-  $("rail").hidden = !p;
-  $("mapwrap").hidden = !p;
-  $("projTitle").hidden = !p;
-  $("topActions").hidden = !p;
-  if (!p) {
-    lastProjectDir = null;
-    renderWelcome();
-    return;
-  }
-  if (p.dir !== lastProjectDir) {
-    lastProjectDir = p.dir;
-    photos = null; result = null; areas = []; checked = new Set(); lastResultMtime = null; lastProgressStatus = null;
-    initMap();
+  const dir = p ? p.dir : null;
+  if (dir !== lastProjectDir) {
+    const first = lastProjectDir === undefined;
+    lastProjectDir = dir;
+    photos = null; result = null; areas = []; lastResultMtime = null; lastProgressStatus = null;
     clearLayers();
-    loadPhotos(true);
-    loadResult(true);
-    applySettings(p.settings);
-    $("exportDir").value = p.dir + sep() + "exports";
+    if (p) {
+      loadPhotos(true);
+      loadResult(true);
+      $("exportDir").value = p.dir + sep() + "exports";
+      if (first) setPanel(p.has_result ? "layers" : (p.count ? "process" : "import"));
+    } else {
+      setPanel("import");
+      map.setView([0, 0], 2);
+    }
   }
-  $("projName").textContent = p.name;
-  $("projDir").textContent = p.dir;
-  renderPhotos(p);
+  const name = $("projName");
+  if (document.activeElement !== name) name.value = p ? p.name : "Unnamed project";
+  name.disabled = !p;
+  name.title = p ? "Click to rename the project" : "Import photos to start a project";
+  $("mOpenFolder").disabled = !p;
+  $("mClose").disabled = !p;
+  $("mDiag").disabled = !p;
+  $("mLog").disabled = !p;
+
+  const geotiff = p && p.geotiff;
+  $("railProcess").disabled = !p || !p.count || !!geotiff;
+  $("railAreas").disabled = !p;
+  $("railExport").disabled = !(p && p.has_result);
+  $("emptyCard").hidden = !!(p && (p.count || p.has_result)) || busyScan();
+
+  renderImport(p);
   renderProcess(p);
-  renderExport();
+  renderStatusBar(p);
+  if (!$("dash").hidden) renderDash();
 }
 
-function renderWelcome() {
-  if (!$("newParent").value) $("newParent").value = status.default_dir;
-  const ul = $("recentList");
-  ul.innerHTML = "";
-  if (!status.recent.length) {
-    const li = document.createElement("li");
-    li.className = "empty";
-    li.textContent = "Projects you create or open will be listed here.";
-    ul.append(li);
-  }
-  for (const d of status.recent) {
-    const li = document.createElement("li");
-    const b = document.createElement("button");
-    const name = d.split(/[\\/]/).pop();
-    b.innerHTML = "<strong></strong><small></small>";
-    b.querySelector("strong").textContent = name.replace(/_/g, " ");
-    b.querySelector("small").textContent = d;
-    b.onclick = () => openProject(d);
-    li.append(b);
-    ul.append(li);
-  }
+function setPanel(name) {
+  panel = name;
+  $("side").hidden = !name;
+  document.querySelectorAll(".pane").forEach((el) => (el.hidden = el.dataset.pane !== name));
+  document.querySelectorAll(".railbtn[data-panel]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.panel === name));
+  if (name !== "areas" && tool && tool !== "select") setTool(null);
+  if (map) setTimeout(() => map.invalidateSize(), 0);
 }
 
-// ------------------------------------------------------------------ photos
-function renderPhotos(p) {
+// ------------------------------------------------------------------ import
+function renderImport(p) {
+  const sc = status.scan;
+  const scanning = busyScan();
+  ["srcImages", "srcFolder", "srcTif", "emImages", "emFolder", "emTif"].forEach((id) => ($(id).disabled = scanning || status.running));
+  if (scanWasRunning && !scanning && sc) {
+    lastScan = sc;
+    if (sc.error) setErr("importErr", sc.error);
+    else {
+      toast(sc.added ? "Imported " + fmt(sc.added) + " photos." : "No new photos found there.");
+      $("pastePath").value = "";
+    }
+    loadPhotos(true);
+  }
+  scanWasRunning = scanning;
+
+  $("importDetails").hidden = !p || (!p.count && !p.geotiff);
+  if (!p) return;
   const ul = $("folderList");
   ul.innerHTML = "";
+  if (p.geotiff) {
+    const li = document.createElement("li");
+    li.innerHTML = "<span><b></b><small>GeoTIFF</small></span>";
+    li.querySelector("b").textContent = p.geotiff.split(/[\\/]/).pop();
+    li.title = p.geotiff;
+    ul.append(li);
+  }
   for (const f of p.folders) {
     const li = document.createElement("li");
     const s = document.createElement("span");
@@ -146,7 +182,7 @@ function renderPhotos(p) {
     bName.textContent = parts.pop() || f;
     const sm = document.createElement("small");
     const parent = parts.join(sep());
-    sm.textContent = parent.length > 42 ? "…" + parent.slice(-41) : parent;
+    sm.textContent = parent.length > 40 ? "…" + parent.slice(-39) : parent;
     s.append(bName, sm);
     s.title = f;
     const x = document.createElement("button");
@@ -154,7 +190,7 @@ function renderPhotos(p) {
     x.title = "Remove these photos from the project";
     x.setAttribute("aria-label", "Remove folder " + f);
     x.onclick = async () => {
-      if (status.running) return toast("Cancel processing first.");
+      if (status.running) return toast("Stop processing first.");
       await api("/api/photos/remove_folder", { folder: f });
       await loadPhotos(true);
       refresh();
@@ -162,48 +198,75 @@ function renderPhotos(p) {
     li.append(s, x);
     ul.append(li);
   }
-  const sc = status.scan;
-  const scanning = sc && !sc.finished;
-  $("scanBox").hidden = !scanning;
-  $("folderAdd").disabled = scanning || status.running;
-  if (scanning) {
-    $("scanBar").style.width = (sc.total ? (100 * sc.done) / sc.total : 2) + "%";
-    $("scanText").textContent = sc.total ? "Reading photo " + fmt(sc.done) + " of " + fmt(sc.total) : "Looking for photos…";
+  if (p.geotiff) {
+    facts($("photoFacts"), []);
+    $("issues").hidden = true;
+    $("selectionBox").hidden = true;
+    $("btnToProcess").hidden = true;
+    return;
   }
-  if (scanWasRunning && !scanning && sc) {
-    if (sc.error) setErr("photoErr", sc.error);
-    else {
-      toast(sc.added ? "Added " + fmt(sc.added) + " photos." : "No new photos found in that folder.");
-      if (sc.errors) setErr("photoErr", fmt(sc.errors) + " files could not be read, e.g. " + (sc.error_examples || []).join("; "));
-      $("folderPath").value = "";
-    }
-    loadPhotos(true);
-  }
-  scanWasRunning = scanning;
-
-  const cams = Object.entries(p.cameras || {});
+  const cams = Object.entries(p.cameras || {}).sort((a, b) => b[1] - a[1]);
   const rows = [["Photos", fmt(p.count)]];
   if (p.count) {
-    rows.push(["With GPS position", fmt(p.with_gps), p.with_gps < p.count ? "warn" : ""]);
     rows.push(["RTK fixed", fmt(p.rtk_fixed)]);
-    if (p.oblique) rows.push(["Tilted (skipped)", fmt(p.oblique), "warn"]);
     if (p.median_rel_alt) rows.push(["Flight height", fmt(p.median_rel_alt, 0) + " m (" + fmt(p.median_rel_alt * 3.28084, 0) + " ft)"]);
-    if (p.est_gsd_cm) rows.push(["Photo resolution", "≈ " + fmt(p.est_gsd_cm, 1) + " cm/px"]);
-    for (const [k, n] of cams) rows.push([cams.length > 1 ? "Camera (" + fmt(n) + ")" : "Camera", k.replace(/\s+f[\d.]+/, "").trim()]);
+    if (p.est_gsd_cm) rows.push(["Photo resolution", fmt(p.est_gsd_cm, 1) + " cm (" + fmt(p.est_gsd_cm / 2.54, 2) + " in)"]);
+    if (cams.length) rows.push(["Camera", cams[0][0].replace(/\s+f[\d.]+.*$/, "").replace(/\s+\d+x\d+$/, "").trim()]);
   }
   facts($("photoFacts"), rows);
+
+  const issues = [];
+  const noGps = p.count - p.with_gps;
+  if (noGps) issues.push(fmt(noGps) + (noGps === 1 ? " photo has" : " photos have") + " no GPS position and will be skipped.");
+  if (p.oblique) issues.push(fmt(p.oblique) + (p.oblique === 1 ? " photo is" : " photos are") + " tilted away from straight down and will be skipped.");
+  if (p.other_camera) issues.push(fmt(p.other_camera) + (p.other_camera === 1 ? " photo comes" : " photos come") + " from another camera and will be skipped.");
+  if (lastScan && lastScan.skipped_small) issues.push(fmt(lastScan.skipped_small) + " small images (thumbnails or previews) were not imported.");
+  if (lastScan && lastScan.errors) issues.push(fmt(lastScan.errors) + " files couldn't be read, e.g. " + (lastScan.error_examples || []).join("; "));
+  const box = $("issues");
+  box.hidden = !issues.length;
+  box.innerHTML = "<b>Import details</b><ul></ul>";
+  for (const t of issues) { const li = document.createElement("li"); li.textContent = t; box.querySelector("ul").append(li); }
+
   $("selectionBox").hidden = !p.count;
   const n = p.selected;
   $("selText").textContent = n === p.count ? "All photos will be processed." : fmt(n) + " of " + fmt(p.count) + " photos picked for processing.";
   $("btnSelectAll").hidden = n === p.count;
-  $("mapEmpty").hidden = p.count > 0 || !!result;
-  $("stepPhotos").classList.toggle("done", p.count > 0);
+  $("btnToProcess").hidden = !p.count;
+  $("btnToProcess").disabled = status.running || scanning;
+  $("btnToProcess").textContent = p.has_result ? "Process again…" : "Next: processing options";
+}
+
+async function importSource(kind, path) {
+  setErr("importErr", "");
+  let arg;
+  if (kind === "images") {
+    const files = path || await browse("images", "Choose drone photos", "");
+    if (!files || !files.length) return;
+    arg = { files, recursive: false };
+  } else if (kind === "folder") {
+    const folder = path || await browse("folder", "Choose a folder of drone photos", "");
+    if (!folder) return;
+    arg = { folder, recursive: $("optRecursive").checked };
+  } else {
+    const f = path || await browse("geotiff", "Choose an orthomosaic GeoTIFF", "");
+    if (!f) return;
+    try { await api("/api/geotiff/open", { path: f }); lastScan = null; await refresh(); setPanel("layers"); toast("Opened " + f.split(/[\\/]/).pop()); }
+    catch (e) { setErr("importErr", e.message); setPanel("import"); }
+    return;
+  }
+  const p = status.project;
+  try {
+    if (p && !p.geotiff) await api("/api/photos/add", arg);
+    else await api("/api/project/start", arg);
+    scanWasRunning = true;
+    lastScan = null;
+    setPanel("import");
+    refresh();
+  } catch (e) { setErr("importErr", e.message); setPanel("import"); }
 }
 
 async function loadPhotos(fit) {
-  try {
-    photos = await api("/api/photos");
-  } catch (e) { return; }
+  try { photos = await api("/api/photos"); } catch (e) { photos = null; return; }
   drawPhotos();
   if (fit && !result) fitJob();
 }
@@ -215,90 +278,190 @@ function drawPhotos() {
   if (!photos) return;
   const pts = photos.points;
   const renderer = L.canvas({ padding: 0.3 });
-  for (const [x, y, i, sel, rtk, obl] of pts) {
+  for (const [x, y, i, sel, rtk, flag] of pts) {
     let style;
-    if (obl) style = { radius: 3, color: "#B5432F", weight: 1.5, fillOpacity: 0 };
+    if (flag === 1) style = { radius: 3, color: "#B5432F", weight: 1.5, fillOpacity: 0 };
+    else if (flag === 2) style = { radius: 3, color: "#9AA59E", weight: 1.5, fillOpacity: 0 };
     else if (!sel) style = { radius: 2.5, color: "#7A857E", weight: 1, fillColor: "#7A857E", fillOpacity: 0.6 };
     else style = { radius: 3.5, color: "#ffffff", weight: 1.2, fillColor: rtk ? "#3E6B51" : "#E9B20F", fillOpacity: 1 };
     L.circleMarker([y, x], Object.assign({ renderer, interactive: false }, style)).addTo(layers.cams);
   }
-  if ($("showCams").checked) layers.cams.addTo(map);
-  const anyRtk = pts.some((p) => p[4]);
-  const anyNon = pts.some((p) => !p[4]);
+  if ($("lyrCams").checked) layers.cams.addTo(map);
   const lg = $("legend");
   lg.innerHTML = "";
-  if (pts.length) {
-    if (anyRtk) lg.insertAdjacentHTML("beforeend", '<span><i style="background:#3E6B51"></i>RTK fixed photo</span>');
-    if (anyNon) lg.insertAdjacentHTML("beforeend", '<span><i style="background:#E9B20F"></i>GPS photo</span>');
-    if (pts.some((p) => !p[3])) lg.insertAdjacentHTML("beforeend", '<span><i style="background:#7A857E"></i>Not picked</span>');
-    if (pts.some((p) => p[5])) lg.insertAdjacentHTML("beforeend", '<span><i style="background:transparent;border-color:#B5432F"></i>Tilted, skipped</span>');
-  }
-  lg.hidden = !pts.length || !$("showCams").checked;
+  const add = (c, ring, t) => lg.insertAdjacentHTML("beforeend", '<span><i style="background:' + c + (ring ? ";border-color:" + ring : "") + '"></i>' + t + "</span>");
+  if (pts.some((p) => p[4] && !p[5])) add("#3E6B51", null, "RTK fixed photo");
+  if (pts.some((p) => !p[4] && !p[5])) add("#E9B20F", null, "GPS photo");
+  if (pts.some((p) => !p[3])) add("#7A857E", null, "Not picked");
+  if (pts.some((p) => p[5] === 1)) add("transparent", "#B5432F", "Tilted, skipped");
+  if (pts.some((p) => p[5] === 2)) add("transparent", "#9AA59E", "Other camera, skipped");
 }
 
 // ------------------------------------------------------------------ process
-function applySettings(s) {
-  document.querySelectorAll('input[name=preset]').forEach((r) => (r.checked = r.value === s.preset));
-  document.querySelectorAll('input[name=surface]').forEach((r) => (r.checked = r.value === s.surface));
-  document.querySelectorAll('input[name=compression]').forEach((r) => (r.checked = r.value === s.compression));
+function renderProcess(p) {
+  const pr = status.progress;
+  const running = status.running;
+  $("btnOptions").disabled = running || !p || !p.count || busyScan();
+  $("btnOptions").textContent = p && p.has_result ? "Process again…" : "Processing options…";
+  $("procIdle").hidden = !!(p && p.count) || running;
+  const showRun = running || (pr && (pr.status === "error" || pr.status === "cancelled") && pr.stage);
+  $("runBox").hidden = !showRun;
+  if (pr) {
+    const idx = STAGES.indexOf(pr.stage);
+    document.querySelectorAll("#stageList li").forEach((li, k) => {
+      li.classList.toggle("done", k < idx || pr.status === "done");
+      li.classList.toggle("active", running && k === idx);
+      let sm = li.querySelector("small");
+      if (running && k === idx) {
+        if (!sm) { sm = document.createElement("small"); li.append(sm); }
+        sm.textContent = pr.message || "";
+      } else if (sm) sm.remove();
+    });
+    if (pr.status === "error") setErr("procErr", "Processing stopped: " + (pr.message || "unknown error") + "\nOpen the log for details, or save diagnostics to send for support.");
+    else if (pr.status === "cancelled" && !running) setErr("procErr", "Processing was stopped. Finished steps are kept and reused next time.");
+    else setErr("procErr", "");
+    if (lastProgressStatus && lastProgressStatus !== pr.status && pr.status === "done") {
+      toast("Orthomosaic ready.", 5000);
+      loadResult(true);
+    }
+    lastProgressStatus = pr.status;
+  }
+  if (!$("logDrawer").hidden && running) loadLog();
+}
+
+function renderStatusBar(p) {
+  const pr = status.progress;
+  const st = $("stState");
+  let frac = null, time = "";
+  $("btnCancel").hidden = !status.running;
+  if (busyScan()) {
+    const sc = status.scan;
+    st.innerHTML = "<b>Importing</b> · " + (sc.total ? "reading photo " + fmt(sc.done) + " of " + fmt(sc.total) : "looking for photos…");
+    frac = sc.total ? sc.done / sc.total : 0.02;
+  } else if (status.running && pr) {
+    st.innerHTML = "<b>Processing</b> · ";
+    st.append(STAGE_LABEL[pr.stage] || pr.message || "Starting");
+    frac = pr.overall || 0;
+    const elapsed = pr.started ? Math.max(pr.elapsed || 0, Date.now() / 1000 - pr.started) : pr.elapsed;
+    time = fmtTime(elapsed) + (pr.eta ? " · about " + fmtTime(pr.eta) + " left" : "");
+  } else if (busyExport()) {
+    const ex = status.export;
+    st.innerHTML = "<b>Exporting</b> · ";
+    st.append((ex.current || "") + " (" + Math.min(ex.done + 1, ex.total) + " of " + ex.total + ")");
+    frac = ex.total ? (ex.done + (ex.frac || 0)) / ex.total : 0;
+  } else if (pr && pr.status === "error") {
+    st.textContent = "Processing stopped: " + (pr.message || "error");
+  } else if (!p) {
+    st.textContent = "Ready · import photos to start";
+  } else if (p.has_result) {
+    st.textContent = "Orthomosaic ready";
+  } else if (p.count) {
+    st.textContent = "Ready to process";
+  } else {
+    st.textContent = "Ready";
+  }
+  $("stBarWrap").hidden = frac === null;
+  $("stPct").textContent = frac === null ? "" : Math.round(frac * 100) + "%";
+  if (frac !== null) $("stBar").style.width = Math.round(frac * 100) + "%";
+  $("stTime").textContent = time;
+  const info = [];
+  if (p && p.count) info.push(fmt(p.count) + " photos");
+  if (result && result.report) {
+    if (result.report.gsd_cm) info.push(fmt(result.report.gsd_cm, 1) + " cm/px");
+    if (result.report.area_ha) info.push(acHa(result.report.area_ha));
+  }
+  $("stInfo").textContent = info.join(" · ");
+  $("btnLog").hidden = !p;
+  renderExportProgress();
+}
+
+// ---- processing options dialog
+let estTimer = null;
+let estSeq = 0;
+function openOptions() {
+  const p = status.project;
+  if (!p || !p.count) return;
+  const s = p.settings;
+  setErr("startErr", "");
+  document.querySelectorAll("input[name=preset]").forEach((r) => (r.checked = r.value === s.preset));
+  document.querySelectorAll("input[name=surface]").forEach((r) => (r.checked = r.value === s.surface));
+  document.querySelectorAll("input[name=compression]").forEach((r) => (r.checked = r.value === s.compression));
   $("optExposure").checked = !!s.exposure_balance;
   $("optTrim").checked = s.trim_edges !== false;
-  $("resMode").value = s.resolution_cm ? "custom" : "auto";
-  $("resCm").hidden = !s.resolution_cm;
-  $("resCm").value = s.resolution_cm || "";
-  $("presetHint").textContent = PRESET_HINTS[s.preset] || "";
+  nativeGsdCm = p.est_gsd_cm;
+  let f = s.res_factor || PRESET_RES[s.preset] || 1;
+  if (s.resolution_cm && nativeGsdCm) f = s.resolution_cm / nativeGsdCm;
+  setSliderFactor(f);
+  $("btnStart").textContent = p.has_result ? "Process again" : "Start processing";
+  $("procDlg").showModal();
+  updateResLabel();
+  requestEstimate();
 }
-function readSettings() {
-  const v = (n) => (document.querySelector('input[name=' + n + ']:checked') || {}).value;
-  const custom = $("resMode").value === "custom" && parseFloat($("resCm").value) > 0;
+function setSliderFactor(f) {
+  let best = 0;
+  RES_STEPS.forEach((v, k) => { if (Math.abs(Math.log(v / f)) < Math.abs(Math.log(RES_STEPS[best] / f))) best = k; });
+  $("resSlider").value = best;
+}
+const sliderFactor = () => RES_STEPS[+$("resSlider").value];
+function updateResLabel() {
+  const f = sliderFactor();
+  const el = $("resVal");
+  el.innerHTML = "";
+  if (nativeGsdCm) {
+    const b = document.createElement("b");
+    b.textContent = cmIn(nativeGsdCm * f);
+    el.append(b, f === 1 ? " · full photo resolution" : " · " + fmt(f, f % 1 ? 2 : 0) + "× coarser than the photos");
+  } else {
+    el.textContent = f === 1 ? "Full photo resolution" : fmt(f, 2) + "× coarser than the photos";
+  }
+}
+function readOptions() {
+  const v = (n) => (document.querySelector("input[name=" + n + "]:checked") || {}).value;
   return {
     preset: v("preset") || "balanced",
     surface: v("surface") || "fields",
     compression: v("compression") || "jpeg",
     exposure_balance: $("optExposure").checked,
     trim_edges: $("optTrim").checked,
-    resolution_cm: custom ? parseFloat($("resCm").value) : null,
+    res_factor: sliderFactor(),
+    resolution_cm: null,
   };
 }
-async function saveSettings() {
-  const s = readSettings();
-  $("presetHint").textContent = PRESET_HINTS[s.preset];
-  $("resCm").hidden = $("resMode").value !== "custom";
-  try { await api("/api/settings", s); } catch (e) { toast(e.message); }
+function requestEstimate() {
+  clearTimeout(estTimer);
+  estTimer = setTimeout(async () => {
+    const o = readOptions();
+    const seq = ++estSeq;
+    $("estBox").style.opacity = 0.55;
+    try {
+      const e = await api("/api/estimate?preset=" + o.preset + "&res_factor=" + o.res_factor + "&compression=" + o.compression);
+      if (seq !== estSeq) return;
+      $("estBox").style.opacity = 1;
+      if (!e.ok) { ["estPhotos", "estArea", "estSize", "estTime"].forEach((id) => ($(id).textContent = "–")); $("estPhotos").textContent = fmt(e.photos || 0); return; }
+      if (e.gsd_native_cm) { nativeGsdCm = e.gsd_native_cm; updateResLabel(); }
+      $("estPhotos").textContent = fmt(e.photos);
+      $("estArea").textContent = fmt(e.area_ha * 2.47105, 0) + " ac";
+      $("estArea").title = fmt(e.area_ha, 1) + " ha";
+      $("estSize").textContent = fmtBytes(e.size_bytes);
+      $("estTime").textContent = fmtDur(e.seconds);
+      $("estNote").textContent = e.cached_features
+        ? "Features from an earlier run are reused for " + fmt(e.cached_features) + " photos. Estimates adjust to this computer after each job."
+        : "Estimates adjust to this computer after each job.";
+    } catch (err) { if (seq === estSeq) $("estBox").style.opacity = 1; }
+  }, 180);
+}
+async function startProcessing() {
+  setErr("startErr", "");
+  try {
+    await api("/api/process/start", { settings: readOptions() });
+    lastProgressStatus = "starting";
+    $("procDlg").close();
+    setPanel("process");
+    refresh();
+  } catch (e) { setErr("startErr", e.message); }
 }
 
-function renderProcess(p) {
-  const pr = status.progress;
-  const running = status.running;
-  $("btnStart").disabled = running || !p.count || (status.scan && !status.scan.finished);
-  $("btnStart").textContent = p.has_result ? "Process again" : "Start processing";
-  $("btnStart").hidden = running;
-  $("runBox").hidden = !(running || (pr && (pr.status === "error" || pr.status === "cancelled") && pr.stage));
-  document.querySelectorAll("#stepProcess fieldset input, #stepProcess select, #stepProcess details input").forEach((el) => (el.disabled = running));
-  if (pr) {
-    const idx = STAGES.indexOf(pr.stage);
-    document.querySelectorAll("#stageList li").forEach((li, k) => {
-      li.classList.toggle("done", k < idx || (pr.status === "done"));
-      li.classList.toggle("active", running && k === idx);
-    });
-    $("runBar").style.width = Math.round((pr.overall || 0) * 100) + "%";
-    $("runMsg").textContent = pr.message || "";
-    const elapsed = pr.started ? Math.max(pr.elapsed || 0, Date.now() / 1000 - pr.started) : pr.elapsed;
-    $("runTime").textContent = running ? fmtTime(elapsed) + (pr.eta ? ", about " + fmtTime(pr.eta) + " left" : "") : "";
-    if (pr.status === "error") setErr("procErr", "Processing stopped: " + (pr.message || "unknown error") + "\nOpen the log for details.");
-    else if (pr.status === "cancelled" && !running) setErr("procErr", "Processing was cancelled.");
-    else setErr("procErr", "");
-    $("btnCancel").hidden = !running;
-    if (lastProgressStatus && lastProgressStatus !== pr.status && pr.status === "done") {
-      toast("Orthomosaic ready.");
-      loadResult(true);
-    }
-    lastProgressStatus = pr.status;
-  }
-  if (!$("logDrawer").hidden && running) loadLog();
-  $("stepProcess").classList.toggle("done", !!p.has_result && !running);
-}
-
+// ------------------------------------------------------------------ result
 async function loadResult(fit) {
   try { result = await api("/api/result"); } catch (e) { result = null; }
   if (!result || !result.ready) {
@@ -310,17 +473,22 @@ async function loadResult(fit) {
     return;
   }
   const r = result.report;
-  const rows = [
-    ["Photos aligned", fmt(r.photos_aligned) + " of " + fmt(r.photos_used)],
-    ["Resolution", fmt(r.gsd_cm, 2) + " cm/px"],
-    ["Area covered", r.area_ha ? fmt(r.area_ha * 2.47105, 1) + " ac (" + fmt(r.area_ha, 1) + " ha)" : null],
-    ["Alignment error", fmt(r.reprojection_rms_px, 1) + " px (" + fmt(r.reprojection_rms_px * r.gsd_native_cm, 1) + " cm)"],
-    ["Seam alignment", r.seam_check ? fmt(r.seam_check.median_cm, 1) + " cm median" : null],
-    ["Processing time", fmtTime(r.processing_seconds)],
-  ];
-  if (r.photos_aligned < r.photos_used) rows[0][2] = "warn";
+  let rows;
+  if (r.imported) {
+    rows = [["Source", "Imported GeoTIFF"], ["Resolution", cmIn(r.gsd_cm)]];
+  } else {
+    rows = [
+      ["Photos aligned", fmt(r.photos_aligned) + " of " + fmt(r.photos_used), r.photos_aligned < r.photos_used ? "warn" : ""],
+      ["Resolution", fmt(r.gsd_cm, 2) + " cm (" + fmt(r.gsd_cm / 2.54, 2) + " in)"],
+      ["Area covered", r.area_ha ? acHa(r.area_ha) : null],
+      ["Alignment error", r.reprojection_rms_px != null ? fmt(r.reprojection_rms_px, 1) + " px (" + fmt(r.reprojection_rms_px * r.gsd_native_cm, 1) + " cm)" : null],
+      ["Seam alignment", r.seam_check ? fmt(r.seam_check.median_cm, 1) + " cm median" : null],
+      ["Processing time", fmtTime(r.processing_seconds)],
+    ];
+  }
   facts($("resultFacts"), rows);
   $("resultBox").hidden = false;
+  $("btnOutputs").hidden = !!r.imported;
   $("areasLocked").hidden = true;
   $("areasTools").hidden = false;
   if (result.mtime !== lastResultMtime) {
@@ -338,15 +506,15 @@ function drawOrtho() {
   layers.ortho = L.tileLayer("/tiles/{z}/{x}/{y}.png?v=" + result.mtime, {
     tileSize: 256, minNativeZoom: 0, maxNativeZoom: result.max_native_zoom, minZoom: -4, maxZoom: 22,
     noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 4, updateWhenZooming: false,
-  }).addTo(map);
+    opacity: +$("lyrOrthoOp").value,
+  });
+  if ($("lyrOrtho").checked) layers.ortho.addTo(map);
   layers.ortho.bringToBack();
   map.setMaxZoom(result.max_native_zoom + 3);
-  $("mapEmpty").hidden = true;
 }
 
 // ------------------------------------------------------------------ map
 function initMap() {
-  if (map) return;
   const crs = L.extend({}, L.CRS.Simple, { transformation: new L.Transformation(1 / R0, 0, -1 / R0, 0) });
   map = L.map("map", { crs, minZoom: -4, maxZoom: 15, zoomSnap: 0.25, zoomDelta: 0.5, attributionControl: false, zoomControl: false, wheelPxPerZoomLevel: 90 });
   L.control.zoom({ position: "bottomright" }).addTo(map);
@@ -362,6 +530,7 @@ function initMap() {
 function clearLayers() {
   for (const k of ["cams", "ortho", "draft"]) if (layers[k]) { layers[k].remove(); layers[k] = null; }
   if (layers.areas) layers.areas.clearLayers();
+  renderAreaList();
 }
 function fitJob() {
   if (!map) return;
@@ -370,8 +539,7 @@ function fitJob() {
     const b = result.bounds;
     bb = L.latLngBounds([b[1], b[0]], [b[3], b[2]]);
   } else if (photos && photos.points.length) {
-    bb = L.latLngBounds(photos.points.map((p) => [p[1], p[0]]));
-    bb = bb.pad(0.15);
+    bb = L.latLngBounds(photos.points.map((p) => [p[1], p[0]])).pad(0.15);
   }
   if (bb && bb.isValid()) map.fitBounds(bb, { padding: [30, 30] });
 }
@@ -390,8 +558,7 @@ function setTool(t) {
   $("btnSelectArea").classList.toggle("secondary", tool === "select");
   $("toolHint").textContent = tool && tool !== "select" ? TOOL_HINTS[tool] : "";
   if (tool === "select") toast(TOOL_HINTS.select);
-  const c = map.getContainer();
-  c.classList.toggle("cursor-cross", !!tool);
+  map.getContainer().classList.toggle("cursor-cross", !!tool);
   if (tool) { map.dragging.disable(); map.doubleClickZoom.disable(); }
   else { map.dragging.enable(); map.doubleClickZoom.enable(); }
 }
@@ -442,7 +609,6 @@ function onMapClick(e) {
 }
 function onMapDbl() { if (tool === "poly" && draw && draw.pts.length >= 3) finishPoly(); }
 function finishPoly() {
-  // a double-click also fires two clicks; drop a duplicate final point
   let pts = draw.pts;
   if (pts.length > 3) {
     const a = map.latLngToContainerPoint(pts[pts.length - 1]), b = map.latLngToContainerPoint(pts[pts.length - 2]);
@@ -455,7 +621,7 @@ function finishPoly() {
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea")) return;
-  if (e.key === "Escape") { if (draw) cancelDraft(); else if (tool) setTool(null); }
+  if (e.key === "Escape") { if (draw) cancelDraft(); else if (tool) setTool(null); else if (!$("dash").hidden && status.project) $("dash").hidden = true; }
   if (e.key === "Backspace" && tool === "poly" && draw && draw.pts.length > 1) {
     draw.pts.pop();
     layers.draft.setLatLngs(draw.pts);
@@ -472,33 +638,28 @@ function nextName() {
 }
 async function loadAreas() {
   try { areas = (await api("/api/areas")).areas; } catch (e) { areas = []; }
-  areas.forEach((a) => checked.add(a.id));
   drawAreas();
 }
 const plain = () => areas.map((a) => ({ id: a.id, name: a.name, kind: a.kind, rings: a.rings }));
 async function saveAreas() {
-  try {
-    areas = (await api("/api/areas", { areas: plain() })).areas;
-    drawAreas();
-  } catch (e) { toast(e.message); }
+  try { areas = (await api("/api/areas", { areas: plain() })).areas; drawAreas(); }
+  catch (e) { toast(e.message); }
 }
 async function addArea(a) {
   a.id = "";
   areas.push(a);
-  const before = new Set(areas.map((x) => x.id));
-  areas = (await api("/api/areas", { areas: plain() })).areas;
-  areas.forEach((x) => { if (!before.has(x.id)) checked.add(x.id); });
+  try { areas = (await api("/api/areas", { areas: plain() })).areas; } catch (e) { toast(e.message); }
   drawAreas();
-  focusArea(areas[areas.length - 1].id, true);
+  if (areas.length) focusArea(areas[areas.length - 1].id, true);
 }
 function drawAreas() {
   if (!layers.areas) return;
   layers.areas.clearLayers();
   for (const a of areas) {
     const ll = a.rings.map((r) => r.map((p) => [p[1], p[0]]));
-    const poly = L.polygon(ll, { color: "#E9B20F", weight: 2.5, fillColor: "#E9B20F", fillOpacity: checked.has(a.id) ? 0.1 : 0.02, dashArray: checked.has(a.id) ? null : "4 4" });
+    const poly = L.polygon(ll, { color: "#E9B20F", weight: 2.5, fillColor: "#E9B20F", fillOpacity: 0.08 });
     poly.bindTooltip(a.name, { permanent: true, direction: "center", className: "area-label" });
-    poly.on("click", (e) => { if (!tool) { L.DomEvent.stop(e); focusArea(a.id); } });
+    poly.on("click", (e) => { if (!tool) { L.DomEvent.stop(e); setPanel("areas"); focusArea(a.id); } });
     poly.addTo(layers.areas);
     a._layer = poly;
   }
@@ -510,11 +671,6 @@ function renderAreaList() {
   for (const a of areas) {
     const li = document.createElement("li");
     li.dataset.id = a.id;
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = checked.has(a.id);
-    cb.setAttribute("aria-label", "Export " + a.name);
-    cb.onchange = () => { cb.checked ? checked.add(a.id) : checked.delete(a.id); drawAreas(); };
     const nm = document.createElement("input");
     nm.type = "text";
     nm.value = a.name;
@@ -530,16 +686,14 @@ function renderAreaList() {
     del.textContent = "×";
     del.title = "Remove area";
     del.setAttribute("aria-label", "Remove " + a.name);
-    del.onclick = () => { areas = areas.filter((x) => x.id !== a.id); checked.delete(a.id); saveAreas(); };
-    li.append(cb, nm, sz, del);
+    del.onclick = () => { areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
+    li.append(nm, sz, del);
     ul.append(li);
   }
   $("areaHead").hidden = !areas.length;
-  $("exportBox").hidden = !areas.length;
-  $("areaAll").checked = areas.length && areas.every((a) => checked.has(a.id));
-  const n = areas.filter((a) => checked.has(a.id)).length;
-  $("btnExport").textContent = n === 1 ? "Export 1 area" : "Export " + n + " areas";
-  $("btnExport").disabled = !n || (status && status.export && !status.export.finished);
+  $("areaActions").hidden = !areas.length;
+  const tot = areas.reduce((s, a) => s + a.ac, 0);
+  $("areaCount").textContent = areas.length + (areas.length === 1 ? " area · " : " areas · ") + fmt(tot, tot < 10 ? 1 : 0) + " ac";
 }
 function focusArea(id, zoom, noScroll) {
   document.querySelectorAll("#areaList li").forEach((li) => li.classList.toggle("focus", li.dataset.id === id));
@@ -551,25 +705,158 @@ function focusArea(id, zoom, noScroll) {
     if (li) li.scrollIntoView({ block: "nearest" });
   }
 }
-function renderExport() {
-  const ex = status.export;
-  const running = ex && !ex.finished;
-  $("exportProg").hidden = !running;
-  if (running) {
-    const f = ex.total ? (ex.done + (ex.frac || 0)) / ex.total : 0;
-    $("exportBar").style.width = Math.round(f * 100) + "%";
-    $("exportText").textContent = "Exporting " + (ex.current || "") + " (" + (ex.done + 1) + " of " + ex.total + ")";
+
+// ------------------------------------------------------------------ export
+function openExport(areasFirst) {
+  if (!result) return;
+  setErr("exportErr", "");
+  const has = areas.length > 0;
+  $("expWhole").checked = !has || !areasFirst;
+  $("expAreasWrap").hidden = !has;
+  $("expNoAreas").hidden = has;
+  const ul = $("expAreaList");
+  ul.innerHTML = "";
+  for (const a of areas) {
+    const li = document.createElement("li");
+    li.innerHTML = '<label class="check"><input type="checkbox" checked> <span></span><span class="size"></span></label>';
+    li.querySelector("input").dataset.id = a.id;
+    li.querySelector("input").onchange = () => { syncAll(); requestExportEstimate(); };
+    li.querySelector("span").textContent = a.name;
+    li.querySelector(".size").textContent = fmt(a.ac, a.ac < 10 ? 2 : 1) + " ac";
+    ul.append(li);
   }
+  if (!areasFirst) ul.querySelectorAll("input").forEach((c) => (c.checked = false));
+  syncAll();
+  const comp = (status.project && status.project.settings.compression) || "jpeg";
+  document.querySelectorAll("input[name=expcomp]").forEach((r) => (r.checked = r.value === comp));
+  const g = result.report.gsd_cm;
+  if (g) {
+    $("sc100").innerHTML = "100%<small>" + fmt(g, 1) + " cm</small>";
+    $("sc50").innerHTML = "50%<small>" + fmt(g * 2, 1) + " cm</small>";
+    $("sc25").innerHTML = "25%<small>" + fmt(g * 4, 1) + " cm</small>";
+  }
+  $("expDlg").showModal();
+  requestExportEstimate();
+}
+function syncAll() {
+  const boxes = [...document.querySelectorAll("#expAreaList input")];
+  const n = boxes.filter((c) => c.checked).length;
+  $("expAreasAll").checked = n === boxes.length && n > 0;
+  $("expAreasAll").indeterminate = n > 0 && n < boxes.length;
+  $("expAreasLabel").textContent = "Areas (" + n + " of " + boxes.length + " selected, one GeoTIFF each)";
+}
+function readExport() {
+  return {
+    whole: $("expWhole").checked,
+    ids: [...document.querySelectorAll("#expAreaList input:checked")].map((c) => c.dataset.id),
+    compression: (document.querySelector("input[name=expcomp]:checked") || {}).value || "jpeg",
+    scale: parseFloat((document.querySelector("input[name=expscale]:checked") || {}).value || "1"),
+    overviews: $("expOverviews").checked,
+    out_dir: $("exportDir").value.trim(),
+  };
+}
+let expTimer = null;
+function requestExportEstimate() {
+  clearTimeout(expTimer);
+  expTimer = setTimeout(async () => {
+    const o = readExport();
+    const n = o.ids.length + (o.whole ? 1 : 0);
+    $("btnExport").disabled = !n || busyExport();
+    $("btnExport").textContent = n > 1 ? "Export " + n + " files" : "Export";
+    if (!n) { $("expEst").textContent = "Choose what to export."; return; }
+    try {
+      const e = await api("/api/export/estimate", o);
+      $("expEst").innerHTML = "";
+      const b = document.createElement("b");
+      b.textContent = "≈ " + fmtBytes(e.bytes);
+      $("expEst").append(b, " in " + n + (n === 1 ? " GeoTIFF" : " GeoTIFFs") + " at " + fmt(e.gsd_cm, 1) + " cm (" + fmt(e.gsd_cm / 2.54, 2) + " in) per pixel.");
+    } catch (err) { $("expEst").textContent = ""; }
+  }, 120);
+}
+async function startExport() {
+  setErr("exportErr", "");
+  try {
+    await api("/api/export", readExport());
+    exportWasRunning = true;
+    $("expDlg").close();
+    refresh();
+  } catch (e) { setErr("exportErr", e.message); }
+}
+function renderExportProgress() {
+  const ex = status.export;
+  const running = busyExport();
   if (exportWasRunning && !running && ex) {
-    if (ex.error) setErr("exportErr", ex.error);
+    if (ex.error) toast("Export failed: " + ex.error, 8000);
     else {
-      setErr("exportErr", ex.errors.length ? ex.errors.join("\n") : "");
-      toast("Exported " + ex.files.length + (ex.files.length === 1 ? " GeoTIFF." : " GeoTIFFs."), 5000);
+      const msg = "Exported " + ex.files.length + (ex.files.length === 1 ? " GeoTIFF." : " GeoTIFFs.");
+      toast(ex.errors.length ? msg + " Problems: " + ex.errors.join("; ") : msg, ex.errors.length ? 10000 : 5000);
       if (ex.files.length) api("/api/open_path", { path: ex.out_dir });
     }
   }
   exportWasRunning = !!running;
-  if (areas.length) renderAreaList();
+}
+
+// ------------------------------------------------------------------ projects dashboard
+async function openDash() {
+  $("dash").hidden = false;
+  setErr("dErr", "");
+  $("dClose").hidden = !status.project;
+  await renderDash(true);
+}
+let dashLoaded = 0;
+async function renderDash(force) {
+  if (!force && Date.now() - dashLoaded < 10000) return;
+  dashLoaded = Date.now();
+  let d;
+  try { d = await api("/api/projects"); } catch (e) { return; }
+  $("dLoc").textContent = d.dir;
+  const ul = $("dCards");
+  ul.innerHTML = "";
+  if (!d.projects.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No projects yet. Choose New project and import a folder of photos.";
+    ul.append(li);
+  }
+  const cur = status.project && status.project.dir;
+  for (const pr of d.projects) {
+    const li = document.createElement("li");
+    li.className = "card" + (pr.dir === cur ? " current" : "");
+    const b = document.createElement("button");
+    b.className = "open";
+    b.innerHTML = '<span class="thumb"></span><span class="meta"><strong></strong><small></small><small></small></span>';
+    const th = b.querySelector(".thumb");
+    if (pr.has_thumb) th.style.backgroundImage = "url('/thumb?dir=" + encodeURIComponent(pr.dir) + "&t=" + Math.round(pr.modified) + "')";
+    else th.textContent = pr.has_result ? "" : "Not processed yet";
+    b.querySelector("strong").textContent = pr.name;
+    const sm = b.querySelectorAll("small");
+    sm[0].textContent = "Changed " + new Date(pr.modified * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    sm[1].textContent = pr.dir;
+    b.title = pr.dir;
+    b.onclick = () => openProject(pr.dir);
+    const x = document.createElement("button");
+    x.className = "forget";
+    x.textContent = "×";
+    x.title = "Remove from this list (files are kept)";
+    x.setAttribute("aria-label", "Remove " + pr.name + " from the list");
+    x.onclick = async () => { await api("/api/recent/forget", { dir: pr.dir }); renderDash(true); };
+    li.append(b, x);
+    ul.append(li);
+  }
+}
+async function openProject(d) {
+  setErr("dErr", "");
+  try {
+    await api("/api/project/open", { dir: d });
+    $("dash").hidden = true;
+    lastScan = null;
+    lastProjectDir = undefined; // pick the default panel for this project
+    await refresh();
+  } catch (e) { setErr("dErr", e.message); }
+}
+async function closeProject() {
+  try { await api("/api/project/close", {}); lastScan = null; await refresh(); return true; }
+  catch (e) { toast(e.message); return false; }
 }
 
 // ------------------------------------------------------------------ log
@@ -584,65 +871,87 @@ async function loadLog() {
 }
 function showLog() { $("logDrawer").hidden = false; loadLog(); }
 
-// ------------------------------------------------------------------ actions
-async function openProject(d) {
-  setErr("openErr", "");
-  try { await api("/api/project/open", { dir: d }); await refresh(); }
-  catch (e) { setErr("openErr", e.message); }
-}
+// ------------------------------------------------------------------ wiring
 async function browse(mode, title, initial) {
   try { return (await api("/api/browse", { mode, title, initial: initial || "" })).path; }
-  catch (e) { toast("Could not open the file browser. Paste the path instead."); return ""; }
+  catch (e) { toast("Could not open the file browser. Paste the folder path instead."); return ""; }
 }
+function closeMenu() { $("moreMenu").hidden = true; $("btnMore").setAttribute("aria-expanded", false); }
 
 function wire() {
-  $("newBrowse").onclick = async () => { const p = await browse("folder", "Where should projects be saved?", $("newParent").value); if (p) $("newParent").value = p; };
-  $("newForm").onsubmit = async (e) => {
-    e.preventDefault();
-    setErr("newErr", "");
-    try { await api("/api/project/new", { name: $("newName").value, parent: $("newParent").value }); $("newName").value = ""; await refresh(); }
-    catch (err) { setErr("newErr", err.message); }
-  };
-  $("openOther").onclick = async () => { const p = await browse("folder", "Choose a FieldStitch project folder", status.default_dir); if (p) openProject(p); };
-  $("btnClose").onclick = async () => { try { await api("/api/project/close", {}); refresh(); } catch (e) { toast(e.message); } };
-  $("btnOpenFolder").onclick = () => api("/api/open_path", {});
-  $("projName").onclick = async () => {
-    const n = prompt("Project name", status.project.name);
-    if (n && n.trim()) { await api("/api/rename", { name: n.trim() }); refresh(); }
-  };
-  $("folderBrowse").onclick = async () => { const p = await browse("folder", "Choose a folder of drone photos", $("folderPath").value); if (p) { $("folderPath").value = p; } };
-  $("folderAdd").onclick = async () => {
-    setErr("photoErr", "");
-    const f = $("folderPath").value.trim().replace(/^"|"$/g, "");
-    if (!f) { const p = await browse("folder", "Choose a folder of drone photos", ""); if (!p) return; $("folderPath").value = p; return $("folderAdd").onclick(); }
-    try { await api("/api/photos/add", { folder: f, recursive: $("folderRecursive").checked }); scanWasRunning = true; refresh(); }
-    catch (e) { setErr("photoErr", e.message); }
-  };
-  $("folderPath").addEventListener("keydown", (e) => { if (e.key === "Enter") $("folderAdd").onclick(); });
-  $("btnSelectArea").onclick = () => setTool("select");
-  $("btnSelectAll").onclick = async () => { await api("/api/photos/select", { clear: true }); await loadPhotos(false); refresh(); };
+  document.querySelectorAll(".railbtn[data-panel]").forEach((b) => (b.onclick = () => setPanel(panel === b.dataset.panel ? null : b.dataset.panel)));
+  document.querySelectorAll("[data-closepane]").forEach((b) => (b.onclick = () => setPanel(null)));
+  $("railExport").onclick = () => openExport(false);
 
-  document.querySelectorAll("#stepProcess input, #stepProcess select").forEach((el) => el.addEventListener("change", saveSettings));
-  $("btnStart").onclick = async () => {
-    setErr("procErr", "");
-    try { await api("/api/process/start", { settings: readSettings() }); lastProgressStatus = "starting"; refresh(); }
-    catch (e) { setErr("procErr", e.message); }
+  // top bar
+  $("btnProjects").onclick = () => ($("dash").hidden ? openDash() : (status.project && ($("dash").hidden = true)));
+  const nm = $("projName");
+  nm.onkeydown = (e) => { if (e.key === "Enter") nm.blur(); if (e.key === "Escape") { nm.value = status.project ? status.project.name : ""; nm.blur(); } };
+  nm.onfocus = () => nm.select();
+  nm.onblur = async () => {
+    const p = status.project;
+    const v = nm.value.trim();
+    if (!p || !v || v === p.name) { nm.value = p ? p.name : "Unnamed project"; return; }
+    try {
+      const r = await api("/api/rename", { name: v });
+      lastProjectDir = r.dir;
+      if (r.moved) $("exportDir").value = r.dir + sep() + "exports";
+      toast(r.moved ? "Renamed. The project folder is now " + r.dir : "Renamed.");
+      refresh();
+    } catch (e) { toast(e.message); nm.value = p.name; }
   };
-  $("btnCancel").onclick = async () => { if (confirm("Stop processing? Finished steps are kept and reused next time.")) { await api("/api/process/cancel", {}); refresh(); } };
-  $("btnLog").onclick = showLog;
-  $("btnLog2").onclick = showLog;
+  $("btnMore").onclick = (e) => { e.stopPropagation(); const h = $("moreMenu").hidden; $("moreMenu").hidden = !h; $("btnMore").setAttribute("aria-expanded", h); };
+  document.addEventListener("click", (e) => { if (!e.target.closest(".menuwrap")) closeMenu(); });
+  $("mOpenFolder").onclick = () => { closeMenu(); api("/api/open_path", {}); };
+  $("mLog").onclick = () => { closeMenu(); showLog(); };
   const diag = async () => {
+    closeMenu();
     try { const r = await api("/api/diagnostics", {}); toast("Diagnostics saved to " + r.path, 10000); }
     catch (e) { toast(e.message); }
   };
-  $("btnDiag").onclick = diag;
+  $("mDiag").onclick = diag;
   $("btnDiag2").onclick = diag;
+  $("mClose").onclick = () => { closeMenu(); closeProject(); };
+
+  // import
+  $("srcImages").onclick = $("emImages").onclick = () => importSource("images");
+  $("srcFolder").onclick = $("emFolder").onclick = () => importSource("folder");
+  $("srcTif").onclick = $("emTif").onclick = () => importSource("geotiff");
+  $("pastePath").onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    const v = $("pastePath").value.trim().replace(/^"|"$/g, "");
+    if (!v) return;
+    if (/\.tiff?$/i.test(v)) importSource("geotiff", v);
+    else if (/\.jpe?g$/i.test(v)) importSource("images", [v]);
+    else importSource("folder", v);
+  };
+  $("emRecent").onclick = openDash;
+  $("btnSelectArea").onclick = () => setTool("select");
+  $("btnSelectAll").onclick = async () => { await api("/api/photos/select", { clear: true }); await loadPhotos(false); refresh(); };
+  $("btnToProcess").onclick = openOptions;
+
+  // process
+  $("btnOptions").onclick = openOptions;
+  document.querySelectorAll("input[name=preset]").forEach((r) => (r.onchange = () => { setSliderFactor(PRESET_RES[r.value] || 1); updateResLabel(); requestEstimate(); }));
+  $("resSlider").oninput = () => { updateResLabel(); requestEstimate(); };
+  document.querySelectorAll("input[name=compression]").forEach((r) => (r.onchange = requestEstimate));
+  $("procForm").onsubmit = (e) => {
+    if (e.submitter && e.submitter.value === "start") { e.preventDefault(); startProcessing(); }
+  };
+  $("btnCancel").onclick = async () => { if (confirm("Stop processing? Finished steps are kept and reused next time.")) { await api("/api/process/cancel", {}); refresh(); } };
+  $("btnLog").onclick = () => ($("logDrawer").hidden ? showLog() : ($("logDrawer").hidden = true));
+  $("btnLog2").onclick = showLog;
   $("logClose").onclick = () => ($("logDrawer").hidden = true);
   $("btnOutputs").onclick = () => api("/api/open_path", { path: result && result.outputs_dir });
 
+  // layers
   $("btnFit").onclick = fitJob;
-  $("showCams").onchange = () => { if (layers.cams) { $("showCams").checked ? layers.cams.addTo(map) : layers.cams.remove(); } $("legend").hidden = !$("showCams").checked || !photos || !photos.points.length; };
+  $("lyrCams").onchange = () => { if (layers.cams) $("lyrCams").checked ? layers.cams.addTo(map) : layers.cams.remove(); };
+  $("lyrOrtho").onchange = () => { if (layers.ortho) { $("lyrOrtho").checked ? layers.ortho.addTo(map) : layers.ortho.remove(); if ($("lyrOrtho").checked) layers.ortho.bringToBack(); } };
+  $("lyrOrthoOp").oninput = () => { if (layers.ortho) layers.ortho.setOpacity(+$("lyrOrthoOp").value); };
+  $("lyrAreas").onchange = () => { $("lyrAreas").checked ? layers.areas.addTo(map) : layers.areas.remove(); };
 
+  // areas
   $("toolRect").onclick = () => { $("gridForm").hidden = true; $("toolGrid").setAttribute("aria-pressed", false); setTool("rect"); };
   $("toolPoly").onclick = () => { $("gridForm").hidden = true; $("toolGrid").setAttribute("aria-pressed", false); setTool("poly"); };
   $("toolGrid").onclick = () => {
@@ -662,10 +971,8 @@ function wire() {
     let size = parseFloat($("gridSize").value) || 300;
     if ($("gridUnit").value === "ft") size *= 0.3048;
     try {
-      const keep = new Set(areas.map((a) => a.id));
       const r = await api("/api/areas/grid", { mode, size_m: size, rows: $("gridRows").value, cols: $("gridCols").value });
       areas = r.areas;
-      areas.forEach((a) => { if (!keep.has(a.id)) checked.add(a.id); });
       drawAreas();
       toast("Added " + r.added + " grid areas. Empty cells were skipped.");
       $("gridForm").hidden = true;
@@ -676,26 +983,41 @@ function wire() {
     const p = await browse("file", "Choose field boundaries (KML, KMZ, SHP, GeoJSON)", "");
     if (!p) return;
     try {
-      const keep = new Set(areas.map((a) => a.id));
       const r = await api("/api/areas/import", { path: p });
       areas = r.areas;
-      areas.forEach((a) => { if (!keep.has(a.id)) checked.add(a.id); });
       drawAreas();
       toast("Imported " + r.added + (r.added === 1 ? " boundary." : " boundaries."));
     } catch (e) { toast(e.message, 6000); }
   };
-  $("areaAll").onchange = () => { areas.forEach((a) => ($("areaAll").checked ? checked.add(a.id) : checked.delete(a.id))); drawAreas(); };
-  $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { areas = []; checked.clear(); saveAreas(); } };
-  $("exportBrowse").onclick = async () => { const p = await browse("folder", "Save exported GeoTIFFs in", $("exportDir").value); if (p) $("exportDir").value = p; };
-  $("btnExport").onclick = async () => {
-    setErr("exportErr", "");
-    const ids = areas.filter((a) => checked.has(a.id)).map((a) => a.id);
-    try { await api("/api/export", { ids, out_dir: $("exportDir").value.trim(), compression: $("exportComp").value }); exportWasRunning = true; refresh(); }
-    catch (e) { setErr("exportErr", e.message); }
-  };
+  $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { areas = []; saveAreas(); } };
+  $("btnExportAreas").onclick = () => openExport(true);
   $("btnKml").onclick = async () => {
-    try { const r = await api("/api/areas/kml", { out_dir: $("exportDir").value.trim() }); toast("Saved " + r.path, 5000); }
+    try { const r = await api("/api/areas/kml", { out_dir: $("exportDir").value.trim() }); toast("Saved " + r.path, 6000); }
     catch (e) { toast(e.message); }
+  };
+
+  // export dialog
+  $("expWhole").onchange = requestExportEstimate;
+  $("expAreasAll").onchange = () => { document.querySelectorAll("#expAreaList input").forEach((c) => (c.checked = $("expAreasAll").checked)); syncAll(); requestExportEstimate(); };
+  document.querySelectorAll("input[name=expcomp], input[name=expscale]").forEach((r) => (r.onchange = requestExportEstimate));
+  $("expOverviews").onchange = requestExportEstimate;
+  $("exportBrowse").onclick = async () => { const p = await browse("folder", "Save exported GeoTIFFs in", $("exportDir").value); if (p) $("exportDir").value = p; };
+  $("expForm").onsubmit = (e) => {
+    if (e.submitter && e.submitter.value === "export") { e.preventDefault(); startExport(); }
+  };
+
+  // dashboard
+  $("dClose").onclick = () => ($("dash").hidden = true);
+  $("dNew").onclick = async () => {
+    if (status.project && !(await closeProject())) return;
+    $("dash").hidden = true;
+    setPanel("import");
+  };
+  $("dOpen").onclick = async () => { const p = await browse("folder", "Choose a FieldStitch project folder", $("dLoc").textContent); if (p) openProject(p); };
+  $("dLocChange").onclick = async () => {
+    const p = await browse("folder", "Save new projects in", $("dLoc").textContent);
+    if (!p) return;
+    try { await api("/api/projects_dir", { path: p }); renderDash(true); } catch (e) { setErr("dErr", e.message); }
   };
 }
 
@@ -725,7 +1047,7 @@ function showUpdateInfo() {
   $("updMsg").textContent = "Version " + u.latest + " is available. You have " + u.current + ".";
   if (u.notes) { $("updNotes").textContent = u.notes; $("updNotes").hidden = false; }
   if (u.needs_full) {
-    setErr("updErr", "This update changes the bundled libraries, so it needs the full download. Unzip it in place of your current FieldStitch folder; your projects are kept.");
+    setErr("updErr", "This update changes the bundled libraries, so it needs the full installer. Your projects are kept.");
     if (u.full_url || u.page) { $("updFull").href = u.full_url || u.page; $("updFull").hidden = false; }
   } else {
     $("updInstall").hidden = false;
@@ -764,6 +1086,7 @@ async function pollUpdate() {
   setTimeout(pollUpdate, 1000);
 }
 
+initMap();
 wire();
 $("btnUpdate").onclick = () => checkUpdates(false);
 $("updClose").onclick = () => { if (!updRestarting) $("updDlg").close(); };

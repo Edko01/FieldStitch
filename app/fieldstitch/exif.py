@@ -208,18 +208,31 @@ def camera_key(m):
                                       m.get("focal_mm") or 0, m.get("source", ""))
 
 
+SKIP_DIRS = {"fieldstitch", "_fieldstitch", "work", "thumbs", "outputs", "exports", "$recycle.bin",
+             "system volume information"}
+
+
+def _is_project_dir(path):
+    """FieldStitch (or other processing) project folders hold derived images, not flight photos."""
+    return (os.path.isfile(os.path.join(path, "project.json"))
+            or os.path.isdir(os.path.join(path, "work", "thumbs")))
+
+
 def find_images(folder, recursive=True):
     out = []
     if recursive:
         for root, dirs, files in os.walk(folder):
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in ("fieldstitch", "_fieldstitch")]
+            if root != folder and _is_project_dir(root):
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in SKIP_DIRS]
             for fn in files:
-                if os.path.splitext(fn)[1].lower() in IMAGE_EXTS:
+                if os.path.splitext(fn)[1].lower() in IMAGE_EXTS and not fn.startswith("._"):
                     out.append(os.path.join(root, fn))
     else:
         for fn in os.listdir(folder):
             p = os.path.join(folder, fn)
-            if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in IMAGE_EXTS:
+            if os.path.isfile(p) and os.path.splitext(fn)[1].lower() in IMAGE_EXTS and not fn.startswith("._"):
                 out.append(p)
     out.sort()
     return out

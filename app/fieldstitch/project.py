@@ -39,7 +39,13 @@ def save(directory, proj):
 
 def scan_folder(folder, recursive=True, progress=None, known=None):
     """Read metadata for all JPGs in folder. Returns (metas, errors)."""
-    paths = find_images(folder, recursive)
+    return scan_paths(find_images(folder, recursive), progress, known)
+
+
+MIN_PHOTO_PX = 1200 * 900   # smaller JPGs are thumbnails/previews, not survey photos
+
+
+def scan_paths(paths, progress=None, known=None):
     known = known or set()
     paths = [p for p in paths if os.path.abspath(p) not in known]
     metas = []
@@ -55,7 +61,9 @@ def scan_folder(folder, recursive=True, progress=None, known=None):
     with ThreadPoolExecutor(max_workers=8) as ex:
         for m, err in ex.map(one, paths):
             done[0] += 1
-            if m:
+            if m and m.get("w", 0) * m.get("h", 0) < MIN_PHOTO_PX:
+                errors.append((m["path"], "too small to be a survey photo (%dx%d)" % (m["w"], m["h"])))
+            elif m:
                 metas.append(m)
             else:
                 errors.append(err)
@@ -82,7 +90,9 @@ def summarize(proj):
         fs = sorted(m["f_px"] for m in photos if m.get("f_px"))
         if fs:
             est_gsd = agl / fs[len(fs) // 2] * 100
-    return {"count": n, "with_gps": gps, "rtk_fixed": rtk, "cameras": cams,
+    main = max(cams.values()) if cams else 0
+    other = sum(v for v in cams.values() if v < max(5, 0.2 * main))
+    return {"count": n, "with_gps": gps, "rtk_fixed": rtk, "cameras": cams, "other_camera": other,
             "median_rel_alt": alts[len(alts) // 2] if alts else None, "oblique": oblique,
             "est_gsd_cm": round(est_gsd, 2) if est_gsd else None,
             "selected": len(proj["selection"]) if proj.get("selection") else n}

@@ -1,4 +1,4 @@
-FIELDSTITCH 1.2  -  offline orthomosaics from drone photos
+FIELDSTITCH 1.4  -  offline orthomosaics from drone photos
 =========================================================
 
 Builds a georeferenced orthomosaic (GeoTIFF) from a folder of nadir mapping
@@ -24,31 +24,49 @@ The first time you run the installer, Windows SmartScreen may say it
 
 WORKFLOW
 --------
-1  Photos   Create a project, then add one or more photo folders (an SD
-            card's DCIM folder works; subfolders are included).
-            The map shows where each photo was taken:
-              green = RTK fixed, yellow = standard GPS,
-              red ring = tilted photo (skipped automatically).
-            "Pick photos on map" lets you process only part of a big job.
+FieldStitch opens straight onto the map. The buttons down the left side
+follow the job from top to bottom.
 
-2  Process  Choose a quality:
-              Fast      half-resolution output, quickest; scouting.
-              Balanced  full-resolution output (default).
-              Accurate  finer feature matching, about 2x slower.
-            Output options:
-              Surface "Fields" (smooth ground, best for crops) or
-              "Trees & buildings" (follows taller objects more closely).
-              File type: Compact (JPEG-compressed GeoTIFF, about 10x
-              smaller) or Lossless.
-            Steps that already finished are reused if you cancel and
-            restart, so changing output options re-runs quickly.
+Import     Click Folder and pick the flight's folder (an SD card's DCIM
+           folder works; subfolders are included), or Images to pick
+           individual photos. A project is created and named after the
+           folder; click the name at the top to rename it. Import again
+           to add more photos to the same project.
+           GeoTIFF opens an existing orthomosaic so you can split and
+           export it without processing.
+           The map shows where each photo was taken:
+             green = RTK fixed, yellow = standard GPS,
+             red ring = tilted, grey ring = another camera (both skipped).
+           "Import details" lists anything that will be skipped.
+           "Pick photos on map" processes only part of a big job.
 
-3  Areas    Draw rectangles or polygons, split into a grid (by tile size
-            or rows x columns), or import field boundaries from
-            KML / KMZ / Shapefile (.shp with its .prj) / GeoJSON.
-            Tick the areas you want and click Export. Each area becomes
-            its own GeoTIFF, clipped to the shape, with transparent
-            outside. "Save area outlines as KML" writes the shapes too.
+Process    Choose a processing type (Fast, Balanced or Accurate) and the
+           output resolution with the slider (Full = the photos' own
+           detail). The window shows the area, the orthomosaic's file
+           size and how long processing should take; the time estimate
+           learns this PC's speed after each job.
+           Advanced: surface "Fields" or "Trees & buildings", mosaic
+           storage Compact (JPEG) or Lossless, exposure balancing.
+           Progress, time left and Stop processing are in the bar along
+           the bottom. Finished steps are reused if you stop and restart.
+
+Layers     Show or hide the orthomosaic (with opacity), areas and photo
+           positions.
+
+Areas      Draw rectangles or polygons, split into a grid (by tile size
+           or rows x columns), or import field boundaries from
+           KML / KMZ / Shapefile (.shp with its .prj) / GeoJSON.
+           "Save outlines as KML" writes the shapes too.
+
+Export     Export the whole orthomosaic and/or each area as its own
+           GeoTIFF (clipped to the shape, transparent outside). Choose
+           Compact (JPEG) or Lossless, 100 / 50 / 25 % resolution, and
+           whether to include overviews. The size is shown before you
+           start.
+
+Projects   The grid button at the top left lists your projects with a
+           preview, starts a new one, and sets where new projects are
+           saved (Documents\FieldStitch Projects by default).
 
 
 OUTPUT FILES  (in the project's "outputs" folder)
@@ -99,11 +117,13 @@ TROUBLESHOOTING
 ---------------
   * "Lost contact with FieldStitch": FieldStitch was closed. Open it again
     from the Start menu; projects are saved automatically.
-  * Browse... opens the folder picker in a separate window; it may
-    appear behind the browser (check the taskbar). You can also paste
-    a folder path into the box.
-  * If processing stops with an error, click "Show log". The full log
-    is in the project folder as log.txt.
+  * The folder and file pickers open in a separate window; it may
+    appear behind FieldStitch (check the taskbar). You can also paste
+    a folder path into the Import panel.
+  * If processing stops with an error, click "Log" in the bottom bar.
+    The full log is in the project folder as log.txt. The menu at the
+    top right ("...") has "Save diagnostics", which bundles the log and
+    timings into one file to send for support.
 
 To uninstall, use Settings -> Apps -> Installed apps -> FieldStitch.
 Your projects in Documents\FieldStitch Projects are kept. A program log

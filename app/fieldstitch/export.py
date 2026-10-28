@@ -225,32 +225,45 @@ def safe_filename(s):
     return s or "area"
 
 
-def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90, progress=None):
-    """Write the part of the orthomosaic inside area's polygon to out_path (GeoTIFF)."""
+def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90, progress=None,
+                scale=1.0, overviews=True):
+    """Write the part of the orthomosaic inside area's polygon to out_path (GeoTIFF).
+    area=None exports the whole orthomosaic. scale < 1 writes a coarser copy (e.g. 0.5 = half the pixels
+    on each side)."""
     import rasterio
     from rasterio.enums import Resampling, ColorInterp
     from rasterio.features import geometry_mask
+    from rasterio.transform import Affine
     from rasterio.windows import Window, from_bounds, transform as win_transform
-    geom = {"type": "Polygon", "coordinates": area["rings"]}
-    pts = np.array([p for ring in area["rings"] for p in ring])
+    scale = float(scale or 1.0)
+    label = area["name"] if area else "orthomosaic"
     with rasterio.open(ortho_path) as src:
-        win = from_bounds(pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max(), src.transform)
-        win = win.round_offsets(op="floor").round_lengths(op="ceil")
         full = Window(0, 0, src.width, src.height)
-        try:
-            win = win.intersection(full)
-        except Exception:
-            raise ValueError("Area '%s' does not overlap the orthomosaic" % area["name"])
+        if area is not None:
+            geom = {"type": "Polygon", "coordinates": area["rings"]}
+            pts = np.array([p for ring in area["rings"] for p in ring])
+            win = from_bounds(pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max(), src.transform)
+            win = win.round_offsets(op="floor").round_lengths(op="ceil")
+            try:
+                win = win.intersection(full)
+            except Exception:
+                raise ValueError("Area '%s' does not overlap the orthomosaic" % label)
+        else:
+            geom = None
+            win = full
         if win.width <= 0 or win.height <= 0:
-            raise ValueError("Area '%s' does not overlap the orthomosaic" % area["name"])
+            raise ValueError("Area '%s' does not overlap the orthomosaic" % label)
         col0, row0 = int(win.col_off), int(win.row_off)
         W, H = int(win.width), int(win.height)
-        tr = win_transform(win, src.transform)
+        # keep square pixels with an exact size (scale 0.5 of 1.4 cm -> 2.8 cm)
+        Wo, Ho = max(1, int(W * scale + 1e-6)), max(1, int(H * scale + 1e-6))
+        sx = sy = 1.0 / scale
+        tr = win_transform(win, src.transform) * Affine.scale(sx, sy)
         src_jpeg = (src.compression is not None and src.compression.value == "JPEG")
         comp = compression
         if comp == "same":
             comp = "jpeg" if src_jpeg else "deflate"
-        prof = dict(driver="GTiff", width=W, height=H, dtype="uint8", crs=src.crs, transform=tr, tiled=True,
+        prof = dict(driver="GTiff", width=Wo, height=Ho, dtype="uint8", crs=src.crs, transform=tr, tiled=True,
                     blockxsize=512, blockysize=512, BIGTIFF="IF_SAFER")
         if comp == "jpeg":
             prof.update(count=3, compress="JPEG", photometric="YCBCR", jpeg_quality=int(jpeg_quality))
@@ -258,49 +271,56 @@ def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90,
             prof.update(count=4, compress="DEFLATE", predictor=2, photometric="RGB", ALPHA="YES")
         tmp = out_path + ".part"
         any_data = False
+        rs = Resampling.average if scale < 0.999 else Resampling.nearest
         with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True, GDAL_NUM_THREADS="ALL_CPUS"):
             with rasterio.open(tmp, "w", **prof) as dst:
                 if comp != "jpeg":
                     dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
                 step = 2048
-                nblocks = int(math.ceil(H / step))
-                for bi, r in enumerate(range(0, H, step)):
-                    h = min(step, H - r)
-                    rw = Window(col0, row0 + r, W, h)
-                    rgb = src.read([1, 2, 3], window=rw)
-                    m = src.read_masks(1, window=rw) > 0
-                    btr = win_transform(Window(0, r, W, h), tr)
-                    inside = geometry_mask([geom], out_shape=(h, W), transform=btr, invert=True, all_touched=False)
-                    alpha = m & inside
+                nblocks = int(math.ceil(Ho / step))
+                for bi, r in enumerate(range(0, Ho, step)):
+                    h = min(step, Ho - r)
+                    sr0 = row0 + r * sy
+                    sr1 = min(row0 + H, row0 + (r + h) * sy)
+                    rw = Window(col0, sr0, min(W, Wo * sx), sr1 - sr0)
+                    rgb = src.read([1, 2, 3], window=rw, out_shape=(3, h, Wo), resampling=rs)
+                    m = src.read_masks(1, window=rw, out_shape=(h, Wo), resampling=rs) > 127
+                    alpha = m
+                    if geom is not None:
+                        btr = win_transform(Window(0, r, Wo, h), tr)
+                        inside = geometry_mask([geom], out_shape=(h, Wo), transform=btr, invert=True,
+                                               all_touched=False)
+                        alpha = m & inside
                     any_data = any_data or bool(alpha.any())
                     rgb[:, ~alpha] = 0
-                    ow = Window(0, r, W, h)
+                    ow = Window(0, r, Wo, h)
                     if comp == "jpeg":
                         dst.write(rgb, window=ow)
                         dst.write_mask((alpha * 255).astype(np.uint8), window=ow)
                     else:
                         dst.write(np.concatenate([rgb, (alpha * 255).astype(np.uint8)[None]], 0), window=ow)
                     if progress:
-                        progress((bi + 1) / nblocks * 0.85)
+                        progress((bi + 1) / nblocks * (0.85 if overviews else 0.98))
                 facs = []
                 f = 2
-                while max(W, H) / f >= 256:
+                while overviews and max(Wo, Ho) / f >= 256:
                     facs.append(f)
                     f *= 2
                 if facs:
                     dst.build_overviews(facs, Resampling.average)
                     dst.update_tags(ns="rio_overview", resampling="average")
-                dst.update_tags(AREA_NAME=area["name"])
+                if area is not None:
+                    dst.update_tags(AREA_NAME=area["name"])
         if not any_data:
             os.remove(tmp)
-            raise ValueError("Area '%s' contains no orthomosaic data" % area["name"])
+            raise ValueError("Area '%s' contains no orthomosaic data" % label)
         if os.path.exists(out_path):
             os.remove(out_path)
         from .pipeline import replace_retry
         replace_retry(tmp, out_path)
         if progress:
             progress(1.0)
-    return {"path": out_path, "width": W, "height": H}
+    return {"path": out_path, "width": Wo, "height": Ho}
 
 
 def area_stats(area):
