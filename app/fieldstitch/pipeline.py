@@ -192,9 +192,37 @@ def run(project_dir):
         raise
 
 
+WORKER_DIED = ("A processing worker stopped unexpectedly - most likely the PC ran low on memory. "
+               "Close other programs and process again.")
+
+
+class _SafePool:
+    """Process pool that fails with a clear error (instead of hanging) if a worker dies."""
+
+    def __init__(self, n, init, arg):
+        from concurrent.futures import ProcessPoolExecutor
+        self.ex = ProcessPoolExecutor(max_workers=max(1, min(int(n), 61)), mp_context=mp.get_context("spawn"),
+                                      initializer=init, initargs=(arg,))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.ex.shutdown(wait=True, cancel_futures=True)
+
+    def imap(self, fn, items, chunksize=1):
+        from concurrent.futures.process import BrokenProcessPool
+        try:
+            for x in self.ex.map(fn, items, chunksize=chunksize):
+                yield x
+        except BrokenProcessPool:
+            raise RuntimeError(WORKER_DIED)
+
+    imap_unordered = imap
+
+
 def _pool(n, init, arg):
-    ctx = mp.get_context("spawn")
-    return ctx.Pool(n, initializer=init, initargs=(arg,))
+    return _SafePool(n, init, arg)
 
 
 def _run(project_dir, prog):
@@ -643,15 +671,16 @@ def _run(project_dir, prog):
         prog.set("surface", 0.6, "Balancing exposure", force=True)
         import cv2
         from .features import read_file
-        thumbs = []
-        for c in cams:
+        def load_thumb(c):
             p = os.path.join(thumb_dir, "%d.jpg" % c["idx"])
             try:
                 t = cv2.imdecode(read_file(p), cv2.IMREAD_COLOR)[..., ::-1]
-                t = cv2.blur(t, (5, 5))
-                thumbs.append(np.ascontiguousarray(t))
+                return np.ascontiguousarray(cv2.blur(t, (5, 5)))
             except Exception:
-                thumbs.append(None)
+                return None
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 2)) as ex:
+            thumbs = list(ex.map(load_thumb, cams))
         from .ortho import compute_gains
         spacing = max(2.0, float(np.median([2 * hs for hs in half_short[ia]])) / 14.0)
         gains = compute_gains(cams, thumbs, dsm, (ox0, oy0, ox1, oy1), spacing, log)
@@ -792,7 +821,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     per_worker = 900 * 1024 ** 2 + 6 * img_bytes
     nworkers = settings.get("workers") or worker_count(per_worker)
     ram = total_ram_bytes()
-    cache_bytes = int(max(6 * img_bytes, min(0.45 * ram / max(nworkers, 1), 40 * img_bytes)))
+    cache_bytes = int(max(6 * img_bytes, min(0.25 * ram / max(nworkers, 1), 40 * img_bytes)))
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
            "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
            "cache_bytes": cache_bytes,
@@ -811,10 +840,38 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             if not jpeg:
                 dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
             done = 0
+            import queue as _queue
+            from .ortho import render_worker_main
             ctxm = mp.get_context("spawn")
-            with ctxm.Pool(nworkers, initializer=init_render, initargs=(ctx_file,)) as pool:
-                t_write = 0.0
-                for res, tt in pool.imap_unordered(render_group, groups):
+            # workers pull short runs of neighbouring tile groups (photo cache reuse) and
+            # stream each group back as soon as it is done (bounded memory)
+            task_q = ctxm.Queue()
+            res_q = ctxm.Queue(maxsize=max(2, nworkers // 2))
+            seg = max(1, min(4, int(round(len(groups) / float(nworkers * 3)))))
+            for i0 in range(0, len(groups), seg):
+                task_q.put(groups[i0:i0 + seg])
+            for _ in range(nworkers):
+                task_q.put(None)
+            procs = [ctxm.Process(target=render_worker_main, args=(ctx_file, task_q, res_q), daemon=True)
+                     for _ in range(nworkers)]
+            for pr_ in procs:
+                pr_.start()
+            t_write = 0.0
+            remaining = len(groups)
+            try:
+                while remaining:
+                    try:
+                        item = res_q.get(timeout=5)
+                    except _queue.Empty:
+                        if any(pr_.exitcode not in (None, 0) for pr_ in procs):
+                            raise RuntimeError(WORKER_DIED)
+                        if all(pr_.exitcode == 0 for pr_ in procs):
+                            raise RuntimeError("Rendering stopped before all tiles were finished.")
+                        continue
+                    if item[0] == "error":
+                        raise RuntimeError("Rendering failed: " + item[1])
+                    _, res, tt = item
+                    remaining -= 1
                     if T:
                         T.add("render", tt)
                     tw0 = time.time()
@@ -828,6 +885,12 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                         done += 1
                         prog.set("ortho", 0.85 * done / len(tiles), "Rendered %d / %d tiles" % (done, len(tiles)))
                     t_write += time.time() - tw0
+            finally:
+                for pr_ in procs:
+                    if pr_.is_alive():
+                        pr_.terminate()
+                for pr_ in procs:
+                    pr_.join(timeout=5)
             if T:
                 T.lap("render tiles")
                 T.add("geotiff", {"write": t_write})

@@ -1,8 +1,8 @@
 {
- "version": "1.2.5",
+ "version": "1.3.0",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.5.zip",
- "sha256": "ed36766b2ab5f64449cd5a6b5259891118a0b93bba35d3e50d6e05ae76ee5319",
- "notes": "- Fixes jobs stopping with \"Access is denied ... progress.json\": progress and project files now wait out Windows file locks, and a failed progress update can never stop a job\n- Includes 1.2.4: no long pause re-checking saved features, live timer",
+ "app_zip": "updates/fieldstitch-app-1.3.0.zip",
+ "sha256": "ca4516d94087490532321e04e93f16935b28864b54115b122d514e9681354843",
+ "notes": "Speed release:\n- Camera alignment: uses all CPU cores, solves each step only as precisely as needed and stops when gains become negligible (about 2-3x faster)\n- Exposure balance: seconds instead of minutes on big jobs\n- Rendering: faster blending and better photo reuse, about 1.5-2x faster\n- A crashed worker (e.g. low memory) now stops the job with a clear message instead of hanging",
  "date": "2026-10-28"
 }

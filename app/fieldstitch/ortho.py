@@ -80,10 +80,12 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
         if th is None:
             continue
         bx0, by0, bx1, by1 = cam["bbox"]
-        m = (E >= bx0) & (E <= bx1) & (N >= by0) & (N <= by1)
-        idx = np.where(m)[0]
-        if len(idx) == 0:
+        # regular grid: index ranges straight from the footprint box
+        c0, c1 = np.searchsorted(gx, bx0), np.searchsorted(gx, bx1, side="right")
+        r0, r1 = np.searchsorted(gy, by0), np.searchsorted(gy, by1, side="right")
+        if c1 <= c0 or r1 <= r0:
             continue
+        idx = (np.arange(r0, r1)[:, None] * len(gx) + np.arange(c0, c1)[None, :]).ravel()
         u, v, z = project_pts(cam["R"], cam["C"], cam["k"], P[idx])
         W, H = cam["W"], cam["H"]
         ok = (z > 0) & (u > 0.1 * W) & (u < 0.9 * W) & (v > 0.1 * H) & (v < 0.9 * H)
@@ -138,7 +140,8 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
             vals = np.r_[np.ones(m), -np.ones(m), np.full(n, lam)]
             A = sp.csr_matrix((vals, (rows, cols)), shape=(m + n, n))
             b = np.r_[r, np.zeros(n)]
-            g = spla.lsqr(A, b, atol=1e-8, btol=1e-8, iter_lim=2000)[0]
+            # normal equations: small (photos x photos), sparse, well conditioned thanks to lam
+            g = spla.spsolve((A.T @ A).tocsc(), A.T @ b)
             res = g[sp_img[ia]] - g[sp_img[ib]] - rhs
             keep = np.abs(res) < 0.12
         gains[:, ch] = np.exp(g)
@@ -248,12 +251,17 @@ def render_tile(tile):
         return tile, rgb, alpha
     with np.errstate(invalid="ignore"):
         Wt = np.where(np.isfinite(scores) & covered[None], np.exp(-(scores - best[None]) / c["tau"]), 0.0) * FADE
-    Wt[Wt < 2e-3] = 0.0
+    Wt[Wt < c.get("w_cut", 0.03)] = 0.0
     acc = np.zeros((th, tw, 3), np.float32)
     wsum = np.zeros((th, tw), np.float32)
-    # fine pixel -> coarse grid coordinates
-    fx = (np.arange(tw, dtype=np.float32) / step)
-    fy = (np.arange(th, dtype=np.float32) / step)
+    r = c["reduce"]
+
+    def upsample(coarse, r0, c0, h, w):
+        """Fine-grid bilinear interpolation of coarse samples taken every `step` pixels (exact affine)."""
+        M = np.array([[1.0 / step, 0, c0 / step], [0, 1.0 / step, r0 / step]], np.float64)
+        return cv2.warpAffine(coarse, M, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REPLICATE)
+
     for a, ci in enumerate(cand):
         wa = Wt[a].reshape(ncy, ncx)
         if wa.max() <= 0:
@@ -266,30 +274,26 @@ def render_tile(tile):
         c1 = min(tw, (cols[-1] + 1) * step + 1)
         if r1 <= r0 or c1 <= c0:
             continue
-        mxc, myc = np.meshgrid(fx[c0:c1], fy[r0:r1])
-        Ua = U[a].reshape(ncy, ncx)
-        Va = V[a].reshape(ncy, ncx)
-        w_f = cv2.remap(wa.astype(np.float32), mxc, myc, cv2.INTER_LINEAR)
+        h, w = r1 - r0, c1 - c0
+        w_f = upsample(wa.astype(np.float32), r0, c0, h, w)
         if w_f.max() <= 0:
             continue
-        u_f = cv2.remap(Ua, mxc, myc, cv2.INTER_LINEAR)
-        v_f = cv2.remap(Va, mxc, myc, cv2.INTER_LINEAR)
-        img = _get_image(ci)
-        r = c["reduce"]
+        uv = np.dstack([U[a].reshape(ncy, ncx), V[a].reshape(ncy, ncx)]).astype(np.float32)
         if r != 1:
-            u_f = (u_f + 0.5) / r - 0.5
-            v_f = (v_f + 0.5) / r - 0.5
+            uv = (uv + 0.5) / r - 0.5
+        uv_f = upsample(uv, r0, c0, h, w)
+        img = _get_image(ci)
         tw0 = time.perf_counter()
-        samp = cv2.remap(img, u_f, v_f, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        m1, m2 = cv2.convertMaps(uv_f, None, cv2.CV_16SC2)
+        samp = cv2.remap(img, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         _T["warp"] += time.perf_counter() - tw0
         g = c["cams"][ci]["gain"]
-        samp = samp.astype(np.float32) * np.array(g[::-1], np.float32)  # BGR order
-        acc[r0:r1, c0:c1] += samp * w_f[..., None]
+        w3 = cv2.merge([w_f * g[2], w_f * g[1], w_f * g[0]])  # BGR gains folded into the weights
+        acc[r0:r1, c0:c1] += cv2.multiply(samp, w3, dtype=cv2.CV_32F)
         wsum[r0:r1, c0:c1] += w_f
     # smooth coverage edge: interpolate the coarse coverage indicator and cut at 0.5
     cov = covered.reshape(ncy, ncx).astype(np.float32)
-    FXg, FYg = np.meshgrid(fx, fy)
-    cov_f = cv2.remap(cov, FXg, FYg, cv2.INTER_LINEAR)
+    cov_f = upsample(cov, 0, 0, th, tw)
     valid = (wsum > 1e-4) & (cov_f >= 0.5)
     out = acc / np.maximum(wsum, 1e-6)[..., None]
     out = np.clip(out + 0.5, 0, 255).astype(np.uint8)
@@ -299,9 +303,27 @@ def render_tile(tile):
     return tile, np.ascontiguousarray(rgb), alpha
 
 
+def render_worker_main(ctx_file, task_q, res_q):
+    """Render worker: pull runs of tile groups, stream each group's tiles back."""
+    import traceback
+    try:
+        init_render(ctx_file)
+        while True:
+            seg = task_q.get()
+            if seg is None:
+                break
+            for group in seg:
+                res, snap = render_group(group)
+                res_q.put(("ok", res, snap))
+    except Exception:
+        res_q.put(("error", traceback.format_exc()))
+
+
 def render_group(group):
     t0 = time.perf_counter()
     res = [render_tile(t) for t in group]
+    if os.environ.get("FIELDSTITCH_TEST_DIE"):
+        os._exit(3)  # test hook: simulate a worker being killed
     _T["total"] += time.perf_counter() - t0
     snap = dict(_T)
     for k in _T:

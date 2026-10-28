@@ -17,6 +17,20 @@ from .geo import rodrigues_batch, rotvec_batch
 
 NI = 8  # intrinsics per group
 
+_POOL = []
+PCG_RTOL = float(os.environ.get("FIELDSTITCH_PCG_RTOL", "1e-4"))  # inexact LM steps are fine
+
+
+def _pmap(fn, items):
+    """Run fn over items on a shared thread pool (numpy releases the GIL in the heavy parts)."""
+    items = list(items)
+    if len(items) <= 1:
+        return [fn(x) for x in items]
+    if not _POOL:
+        from concurrent.futures import ThreadPoolExecutor
+        _POOL.append(ThreadPoolExecutor(max_workers=max(1, min(16, (os.cpu_count() or 2)))))
+    return list(_POOL[0].map(fn, items))
+
 
 def project(R, C, intr, cam_group, X, oc, op, return_parts=False):
     Xc = np.einsum("mij,mj->mi", R[oc], X[op] - C[oc])
@@ -145,11 +159,12 @@ class BundleAdjuster:
         starts = np.flatnonzero(np.r_[True, ids[1:] != ids[:-1]])
         out[ids[starts]] += np.add.reduceat(arr, starts, axis=0)
 
-    def _blocks(self, ids, Aa, Bb, n, perm=None, chunk=200000):
+    def _blocks(self, ids, Aa, Bb, n, perm=None, chunk=60000):
+        """Sum of per-observation Aa^T Bb grouped by ids (sorted), computed in parallel chunks."""
         a, b = Aa.shape[2], Bb.shape[2]
-        out = np.zeros((n, a, b))
         M = Aa.shape[0]
-        for s0 in range(0, M, chunk):
+
+        def work(s0):
             sl = slice(s0, min(M, s0 + chunk))
             if perm is None:
                 A_, B_ = Aa[sl], Bb[sl]
@@ -157,16 +172,33 @@ class BundleAdjuster:
                 pp = perm[sl]
                 A_, B_ = Aa[pp], Bb[pp]
             E = np.einsum("mki,mkj->mij", A_, B_)
-            self._seg_add(out, ids[sl], E)
+            ii = ids[sl]
+            starts = np.flatnonzero(np.r_[True, ii[1:] != ii[:-1]])
+            return ii[starts], np.add.reduceat(E, starts, axis=0)
+
+        out = np.zeros((n, a, b))
+        for u, sums in _pmap(work, range(0, M, chunk)):
+            out[u] += sums
         return out
 
-    def _vec(self, ids, Aa, r, n, perm=None):
-        if perm is not None:
-            Aa = Aa[perm]
-            r = r[perm]
-        E = np.einsum("mki,mk->mi", Aa, r)
+    def _vec(self, ids, Aa, r, n, perm=None, chunk=100000):
+        M = Aa.shape[0]
+
+        def work(s0):
+            sl = slice(s0, min(M, s0 + chunk))
+            if perm is None:
+                A_, r_ = Aa[sl], r[sl]
+            else:
+                pp = perm[sl]
+                A_, r_ = Aa[pp], r[pp]
+            E = np.einsum("mki,mk->mi", A_, r_)
+            ii = ids[sl]
+            starts = np.flatnonzero(np.r_[True, ii[1:] != ii[:-1]])
+            return ii[starts], np.add.reduceat(E, starts, axis=0)
+
         out = np.zeros((n, Aa.shape[2]))
-        self._seg_add(out, ids, E)
+        for u, sums in _pmap(work, range(0, M, chunk)):
+            out[u] += sums
         return out
 
     def _linearize(self):
@@ -274,7 +306,18 @@ class BundleAdjuster:
         Vb = sp.bsr_matrix((Vinv, np.arange(P), np.arange(P + 1)), shape=(3 * P, 3 * P))
         Ub = sp.bsr_matrix((Ucc, np.arange(N), np.arange(N + 1)), shape=(6 * N, 6 * N))
         Y = Wb @ Vb
-        S = (Ub - Y @ WTb).tocsr()
+        # Schur complement Y @ W^T, computed for blocks of cameras in parallel
+        nch = max(1, min(16, (os.cpu_count() or 2), N // 200))
+        cuts = np.linspace(0, N, nch + 1).astype(int)
+
+        def part(k):
+            c0, c1 = cuts[k], cuts[k + 1]
+            o0, o1 = self.cam_ptr[c0], self.cam_ptr[c1]
+            Wk_ = sp.bsr_matrix((Wc[o0:o1], self.op[o0:o1], self.cam_ptr[c0:c1 + 1] - o0),
+                                shape=(6 * (c1 - c0), 3 * P))
+            return ((Wk_ @ Vb) @ WTb).tocsr()
+
+        S = (Ub - sp.vstack(_pmap(part, range(nch)), format="csr")).tocsr()
         gp = L["gp"].ravel()
         rhs_c = -L["gc"].ravel() + Y @ gp
         Wk = None
@@ -345,9 +388,9 @@ class BundleAdjuster:
 
         Mop = spla.LinearOperator((n, n), matvec=prec)
         try:
-            x, _ = spla.cg(S, rhs, M=Mop, rtol=1e-7, maxiter=800)
+            x, _ = spla.cg(S, rhs, M=Mop, rtol=PCG_RTOL, maxiter=250)
         except TypeError:  # older scipy
-            x, _ = spla.cg(S, rhs, M=Mop, tol=1e-7, maxiter=800)
+            x, _ = spla.cg(S, rhs, M=Mop, tol=PCG_RTOL, maxiter=250)
         return x
 
     def _apply(self, dcam, dk, dX):
@@ -357,7 +400,7 @@ class BundleAdjuster:
         X = self.X + dX
         return R, C, intr, X
 
-    def run(self, max_iter=30, tol=1e-5, lam=1e-3, time_limit=None):
+    def run(self, max_iter=30, tol=1e-4, lam=1e-3, time_limit=None):
         t0 = time.time()
         cost = self.cost()
         self.log("BA start: %d cams, %d pts, %d obs, cost %.4g" % (self.N, self.P, len(self.oc), cost))
