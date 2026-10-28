@@ -137,10 +137,14 @@ class Progress:
         self._write()
 
     def _write(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.state, f)
-        os.replace(tmp, self.path)
+        # progress is informational: a failed write must never stop a job
+        try:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.state, f)
+            replace_retry(tmp, self.path, tries=8)
+        except Exception:
+            pass
 
 
 def load_project(project_dir):
@@ -148,11 +152,24 @@ def load_project(project_dir):
         return json.load(f)
 
 
+def replace_retry(tmp, path, tries=40):
+    """os.replace that waits out Windows sharing violations (another program reading the file,
+    antivirus, indexer) instead of failing."""
+    for k in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if k == tries - 1:
+                raise
+            time.sleep(min(0.25, 0.02 * (k + 1)))
+
+
 def save_json(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=1)
-    os.replace(tmp, path)
+    replace_retry(tmp, path)
 
 
 def safe_name(s):
@@ -827,7 +844,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
         T.lap("overviews")
     if os.path.exists(path):
         os.remove(path)
-    os.replace(tmp, path)
+    replace_retry(tmp, path)
     # preview image
     try:
         import cv2

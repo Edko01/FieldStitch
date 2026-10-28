@@ -296,7 +296,8 @@ def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90,
             raise ValueError("Area '%s' contains no orthomosaic data" % area["name"])
         if os.path.exists(out_path):
             os.remove(out_path)
-        os.replace(tmp, out_path)
+        from .pipeline import replace_retry
+        replace_retry(tmp, out_path)
         if progress:
             progress(1.0)
     return {"path": out_path, "width": W, "height": H}

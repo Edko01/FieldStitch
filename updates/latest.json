@@ -1,8 +1,8 @@
 {
- "version": "1.2.4",
+ "version": "1.2.5",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.4.zip",
- "sha256": "e2daf34f0097e43b8b1c285f604a8882c7b6e55be01c6ca7d2458ade1121842b",
- "notes": "- Re-running a project no longer re-opens every saved feature file before matching (could take minutes on big jobs after a restart); progress is shown if it has to\n- The processing timer keeps counting during steps that don't report progress\n- Includes 1.2.3 fixes",
+ "app_zip": "updates/fieldstitch-app-1.2.5.zip",
+ "sha256": "ed36766b2ab5f64449cd5a6b5259891118a0b93bba35d3e50d6e05ae76ee5319",
+ "notes": "- Fixes jobs stopping with \"Access is denied ... progress.json\": progress and project files now wait out Windows file locks, and a failed progress update can never stop a job\n- Includes 1.2.4: no long pause re-checking saved features, live timer",
  "date": "2026-10-28"
 }
