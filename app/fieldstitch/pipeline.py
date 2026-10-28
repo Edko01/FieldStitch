@@ -16,8 +16,8 @@ from .geo import Geo, utm_epsg, rot_from_ypr
 from .sysinfo import worker_count, total_ram_bytes
 
 PRESETS = {
-    "fast": dict(reduce=4, nfeat=3000, neighbors=10, per_cell=2, res_factor=2.0, ba_iter=(10, 15, 10)),
-    "balanced": dict(reduce=4, nfeat=5000, neighbors=12, per_cell=3, res_factor=1.0, ba_iter=(15, 25, 15)),
+    "fast": dict(reduce=4, nfeat=3000, neighbors=10, per_cell=2, res_factor=2.0, ba_iter=(8, 10, 6)),
+    "balanced": dict(reduce=4, nfeat=5000, neighbors=12, per_cell=3, res_factor=1.0, ba_iter=(10, 12, 8)),
     "accurate": dict(reduce=2, nfeat=7000, neighbors=16, per_cell=4, res_factor=1.0, ba_iter=(20, 35, 20)),
 }
 
@@ -33,6 +33,7 @@ DEFAULT_SETTINGS = {
     "use_dsm_export": True,
     "trim_edges": True,         # drop ragged edges seen by only one photo
     "workers": None,
+    "gpu": "auto",              # auto | off
 }
 
 STAGES = [("features", 0.22), ("matching", 0.26), ("alignment", 0.17), ("surface", 0.05), ("ortho", 0.30)]
@@ -84,7 +85,8 @@ class Timer:
             if group == "render" and "total" in d:
                 d = dict(d)
                 d["blend & other"] = max(0.0, d["total"] - d.get("read", 0) - d.get("decode", 0) - d.get("warp", 0))
-            parts = ", ".join("%s %.1f s" % (k, v) for k, v in d.items() if k not in ("bytes", "loads"))
+            parts = ", ".join(("%s %d" % (k, v)) if k.startswith("photos") else ("%s %.1f s" % (k, v))
+                              for k, v in d.items() if k not in ("bytes", "loads"))
             extra = ""
             if d.get("bytes") and d.get("read"):
                 extra = " | read %.0f MB at %.0f MB/s per worker" % (d["bytes"] / 1e6, d["bytes"] / 1e6 / max(d["read"], 1e-6))
@@ -390,14 +392,22 @@ def _run(project_dir, prog):
     newkey = {str(i): [m["path"], feat_key] + list(old.get(str(i), []))[2:3] for i, m in enumerate(meta)}
     if tasks:
         done = 0
-        with _pool(nworkers, _noop_init, None) as pool:
-            for idx, cnt, err, tt in pool.imap_unordered(extract, tasks, chunksize=1):
-                done += 1
-                T.add("features", tt)
-                newkey[str(idx)] = [meta[idx]["path"], feat_key, int(cnt)]
-                if err:
-                    log("  feature error on %s: %s" % (meta[idx]["name"], err))
-                prog.set("features", done / len(tasks), "Features %d / %d" % (done, len(tasks)))
+
+        def on_result(idx, cnt, err, tt):
+            nonlocal done
+            done += 1
+            T.add("features", tt)
+            newkey[str(idx)] = [meta[idx]["path"], feat_key, int(cnt)]
+            if err:
+                log("  feature error on %s: %s" % (meta[idx]["name"], err))
+            prog.set("features", done / len(tasks), "Features %d / %d" % (done, len(tasks)))
+
+        if gpu_wanted(settings) and len(tasks) >= 20:
+            run_features_hybrid(tasks, nworkers, on_result, log)
+        else:
+            with _pool(nworkers, _noop_init, None) as pool:
+                for res in pool.imap_unordered(extract, tasks, chunksize=1):
+                    on_result(*res)
     # feature counts: from the cache index when known, otherwise read once and remember
     missing = [i for i in range(n) if len(newkey[str(i)]) < 3]
     for k, i in enumerate(missing):
@@ -444,7 +454,7 @@ def _run(project_dir, prog):
            "dist": [dist_of(i) for i in range(n)], "R": R_gimbal, "C": Cgps, "zg": zg,
            "has_rot": has_gimbal.copy(), "prior_tol": float(os.environ.get("FIELDSTITCH_PRIOR_TOL", "0.18")), "ransac_thr": max(1.0, 0.6 * reduce),
            "min_inliers": 20, "ratio": 0.8, "checks": 48, "use_prior": True,
-           "guided": True, "n_coarse": 1500, "guided_radius": 0.03, "guided_k": 24}
+           "guided": True, "n_coarse": 1000, "guided_radius": 0.03, "guided_k": 16}
     ctx_file = os.path.join(work, "match_ctx.pkl")
 
     from .matching import init_worker, match_pair
@@ -549,10 +559,15 @@ def _run(project_dir, prog):
     uv_all = np.zeros((len(tid), 2))
     o_img = np.argsort(timg, kind="stable")
     bounds_i = np.searchsorted(timg[o_img], np.arange(n + 1))
-    for i in range(n):
+
+    def _load_uv(i):
         idx = o_img[bounds_i[i]:bounds_i[i + 1]]
         if len(idx):
             uv_all[idx] = load_xy(feat_dir, i, W[i], H[i])[tfeat[idx]]
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(16, max(2, nworkers))) as ex:
+        list(ex.map(_load_uv, range(n)))
     del o_img
 
     # initial rotations
@@ -591,9 +606,9 @@ def _run(project_dir, prog):
     log("Adjustment set: %d tracks, %d observations" % (ntr_s, len(s_tid)))
     it1, it2, it3 = preset["ba_iter"]
     rounds = [
-        dict(loss=8.0, optimize_intrinsics=False, max_iter=it1, reject=10.0, retriangulate=True),
-        dict(loss=3.0, optimize_intrinsics=True, max_iter=it2, reject=4.0, retriangulate=True),
-        dict(loss=2.0, optimize_intrinsics=True, max_iter=it3, reject=None),
+        dict(loss=8.0, optimize_intrinsics=False, max_iter=it1, reject=10.0, retriangulate=True, tol=1e-3),
+        dict(loss=3.0, optimize_intrinsics=True, max_iter=it2, reject=4.0, retriangulate=True, tol=1e-3),
+        dict(loss=2.0, optimize_intrinsics=True, max_iter=it3, reject=None, tol=1e-4),
     ]
 
     def ba_prog(fr, msg):
@@ -620,13 +635,7 @@ def _run(project_dir, prog):
     d_tid, d_img, d_uv = tid[keep_obs], timg[keep_obs], uv_all[keep_obs]
     d_tid, _ = _compact(d_tid, np.zeros((ntr, 3)))
     nd = int(d_tid.max()) + 1 if len(d_tid) else 0
-    Xd, ang, ok = rec.triangulate_tracks(d_tid, d_img, d_uv, nd)
-    e = rec.reproj_errors(Xd, d_tid, d_img, d_uv)
-    bad = np.zeros(nd, bool)
-    np.logical_or.at(bad, d_tid, e > 3 * sigma_px)
-    cnt = np.bincount(d_tid, minlength=nd)
-    good = ok & ~bad & (ang > 1.0) & (cnt >= 2)
-    pts = Xd[good]
+    pts = surface_points(rec, d_tid, d_img, d_uv, nd, sigma_px, min(16, max(2, nworkers)))
     log("Surface points: %d" % len(pts))
     if len(pts) < 50:
         pts = X
@@ -797,6 +806,93 @@ def _run(project_dir, prog):
     log("Done in %.1f min" % ((time.time() - t_start) / 60))
 
 
+def surface_points(rec, tid, img, uv, nt, sigma_px, nthreads):
+    """Triangulate all tracks for the surface model, in parallel chunks of whole tracks
+    (observations are sorted by track)."""
+    from concurrent.futures import ThreadPoolExecutor
+    if nt == 0:
+        return np.zeros((0, 3))
+    cuts = np.searchsorted(tid, np.linspace(0, nt, nthreads * 2 + 1).astype(np.int64))
+    cuts[-1] = len(tid)
+
+    def part(k):
+        s0, s1 = cuts[k], cuts[k + 1]
+        if s1 <= s0:
+            return np.zeros((0, 3))
+        t = tid[s0:s1]
+        t0 = int(t[0])
+        t = t - t0
+        n_t = int(t[-1]) + 1
+        X, ang, ok = rec.triangulate_tracks(t, img[s0:s1], uv[s0:s1], n_t)
+        e = rec.reproj_errors(X, t, img[s0:s1], uv[s0:s1])
+        bad = np.bincount(t, weights=(e > 3 * sigma_px).astype(np.float64), minlength=n_t) > 0
+        cnt = np.bincount(t, minlength=n_t)
+        good = ok & ~bad & (ang > 1.0) & (cnt >= 2)
+        return X[good]
+
+    with ThreadPoolExecutor(max_workers=nthreads) as ex:
+        parts = list(ex.map(part, range(len(cuts) - 1)))
+    return np.concatenate(parts) if parts else np.zeros((0, 3))
+
+
+def gpu_wanted(settings):
+    if str(settings.get("gpu", "auto")).lower() in ("off", "false", "0", "no") or os.environ.get("FIELDSTITCH_NO_GPU"):
+        return False
+    if os.environ.get("FIELDSTITCH_FORCE_GPU_WORKERS"):
+        return True   # tests: exercise the GPU workers (and their CPU fallback) without an NVIDIA card
+    from .estimate import gpu_likely
+    return gpu_likely()
+
+
+def run_features_hybrid(tasks, nworkers, on_result, log):
+    """Features on the GPU (when it passes its self-test) and CPU at the same time, pulling photos
+    from one queue. GPU and CPU produce identical SIFT features, so photos can go to either."""
+    import queue as _queue
+    from .features import cpu_worker_main, gpu_worker_main
+    n_gpu = int(os.environ.get("FIELDSTITCH_GPU_PROCS", "2"))
+    threads = max(2, int(round(nworkers * 0.35)))
+    n_cpu = max(1, nworkers - n_gpu * threads)
+    ctxm = mp.get_context("spawn")
+    task_q = ctxm.Queue()
+    res_q = ctxm.Queue()
+    for t in tasks:
+        task_q.put(t)
+    for _ in range(n_cpu + n_gpu * threads):
+        task_q.put(None)
+    procs = [ctxm.Process(target=gpu_worker_main, args=(task_q, res_q, threads, w), daemon=True)
+             for w in range(n_gpu)]
+    procs += [ctxm.Process(target=cpu_worker_main, args=(task_q, res_q), daemon=True) for _ in range(n_cpu)]
+    log("Features: %d GPU workers (%d decode threads each) + %d CPU workers" % (n_gpu, threads, n_cpu))
+    for p_ in procs:
+        p_.start()
+    remaining = len(tasks)
+    gpu_msgs = set()
+    try:
+        while remaining:
+            try:
+                item = res_q.get(timeout=5)
+            except _queue.Empty:
+                if any(p_.exitcode not in (None, 0) for p_ in procs):
+                    raise RuntimeError(WORKER_DIED)
+                if all(p_.exitcode == 0 for p_ in procs):
+                    raise RuntimeError("Feature workers stopped before all photos were done.")
+                continue
+            kind = item[0]
+            if kind == "ok":
+                remaining -= 1
+                on_result(*item[1])
+            elif kind in ("gpu", "gpu_off"):
+                msg = ("GPU: " if kind == "gpu" else "GPU not used: ") + item[2]
+                if msg not in gpu_msgs:
+                    gpu_msgs.add(msg)
+                    log(msg)
+    finally:
+        for p_ in procs:
+            p_.join(timeout=10)
+            if p_.is_alive():
+                p_.terminate()
+
+
 def _noop_init(_):
     try:
         import cv2
@@ -848,10 +944,13 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             grp = [tiles[yy * ntx + xx] for yy in (gy, gy + 1) for xx in (gx, gx + 1) if yy < nty and xx < ntx]
             groups.append(grp)
     img_bytes = float(np.median([c["W"] * c["H"] * 3 for c in cams])) / (reduce * reduce)
-    per_worker = 900 * 1024 ** 2 + 6 * img_bytes
-    nworkers = settings.get("workers") or worker_count(per_worker)
-    ram = total_ram_bytes()
-    cache_bytes = int(max(6 * img_bytes, min(0.25 * ram / max(nworkers, 1), 40 * img_bytes)))
+    # each worker renders a 2x2-tile block photo by photo (accumulators ~270 MB) and keeps a few
+    # decoded photos for the next block of its run
+    # photos straddling the edge of a block are reused by the next block of the same run if cached
+    cache_imgs = 6
+    per_worker = 600 * 1024 ** 2 + (cache_imgs + 1) * img_bytes
+    nworkers = settings.get("workers") or worker_count(per_worker, reserve_bytes=4 * 1024 ** 3)
+    cache_bytes = int(cache_imgs * img_bytes)
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
            "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
            "cache_bytes": cache_bytes,
@@ -862,13 +961,24 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     log("Rendering %d tiles with %d workers (photo decode 1/%d)" % (len(tiles), nworkers, reduce))
     transform = Affine(gsd, 0, ox0 + origin[0], 0, -gsd, oy1 + origin[1])
     prof = ortho_profile(out_w, out_h, epsg, transform, settings)
+    hw, hh = (out_w + 1) // 2, (out_h + 1) // 2
+    prof_half = ortho_profile(hw, hh, epsg, transform * Affine.scale(out_w / hw, out_h / hh), settings)
     tmp = path + ".part"
+    tmp_ovr = path + ".part-ovr"
     jpeg = prof["compress"] == "JPEG"
     prog.set("ortho", 0, "Rendering orthomosaic", force=True)
     with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True, GDAL_NUM_THREADS="ALL_CPUS"):
-        with rasterio.open(tmp, "w", **prof) as dst:
+        with rasterio.open(tmp, "w", **prof) as dst, rasterio.open(tmp_ovr, "w", **prof_half) as ovr:
             if not jpeg:
                 dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+                ovr.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
+
+            def put(ds, win, rgb, alpha):
+                if jpeg:
+                    ds.write(rgb.transpose(2, 0, 1), window=win)
+                    ds.write_mask(alpha, window=win)
+                else:
+                    ds.write(np.concatenate([rgb, alpha[..., None]], 2).transpose(2, 0, 1), window=win)
             done = 0
             import queue as _queue
             from .ortho import render_worker_main
@@ -905,13 +1015,9 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                     if T:
                         T.add("render", tt)
                     tw0 = time.time()
-                    for (tx, ty, tw, th), rgb, alpha in res:
-                        win = Window(tx, ty, tw, th)
-                        if jpeg:
-                            dst.write(rgb.transpose(2, 0, 1), window=win)
-                            dst.write_mask(alpha, window=win)
-                        else:
-                            dst.write(np.concatenate([rgb, alpha[..., None]], 2).transpose(2, 0, 1), window=win)
+                    for (tx, ty, tw, th), rgb, alpha, h_rgb, h_alpha in res:
+                        put(dst, Window(tx, ty, tw, th), rgb, alpha)
+                        put(ovr, Window(tx // 2, ty // 2, h_alpha.shape[1], h_alpha.shape[0]), h_rgb, h_alpha)
                         done += 1
                         prog.set("ortho", 0.85 * done / len(tiles), "Rendered %d / %d tiles" % (done, len(tiles)))
                     t_write += time.time() - tw0
@@ -924,20 +1030,24 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             if T:
                 T.lap("render tiles")
                 T.add("geotiff", {"write": t_write})
-            prog.set("ortho", 0.87, "Building overviews", force=True)
+            prog.set("ortho", 0.9, "Building overviews", force=True)
+            # The half-resolution copy written alongside becomes the external overview file
+            # (<name>.tif.ovr); its own overviews provide the coarser levels. GDAL, QGIS, ArcGIS
+            # and FieldStitch pick it up automatically.
             facs = []
             f = 2
-            while max(out_w, out_h) / f >= 256:
+            while max(hw, hh) / f >= 256:
                 facs.append(f)
                 f *= 2
             if facs:
-                dst.build_overviews(facs, Resampling.average)
-                dst.update_tags(ns="rio_overview", resampling="average")
+                ovr.build_overviews(facs, Resampling.average)
     if T:
         T.lap("overviews")
-    if os.path.exists(path):
-        os.remove(path)
+    for p_ in (path, path + ".ovr"):
+        if os.path.exists(p_):
+            os.remove(p_)
     replace_retry(tmp, path)
+    replace_retry(tmp_ovr, path + ".ovr")
     # preview image
     try:
         import cv2

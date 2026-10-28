@@ -18,7 +18,7 @@ from .geo import rodrigues_batch, rotvec_batch
 NI = 8  # intrinsics per group
 
 _POOL = []
-PCG_RTOL = float(os.environ.get("FIELDSTITCH_PCG_RTOL", "1e-4"))  # inexact LM steps are fine
+PCG_RTOL = float(os.environ.get("FIELDSTITCH_PCG_RTOL", "1e-2"))  # inexact LM steps are fine
 
 
 def _pmap(fn, items):

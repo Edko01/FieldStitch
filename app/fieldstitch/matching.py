@@ -55,7 +55,7 @@ def _get(i):
     else:
         und = xy
     d = desc.astype(np.float32)
-    item = {"xy": xy, "und": und, "desc": d, "norm": (d * d).sum(1), "tree": None}
+    item = {"xy": xy, "und": und, "desc": d, "norm": (d * d).sum(1), "tree": None, "wh": (c["W"][i], c["H"][i])}
     _CACHE[i] = item
     while len(_CACHE) > _CACHE_MAX:
         _CACHE.popitem(last=False)
@@ -81,6 +81,23 @@ def _ratio_match(da, db, ratio, checks):
     return _unique(np.array(q, np.int64), np.array(t, np.int64), np.array(dd, np.float32))
 
 
+def _ratio_match_bf(da, db, ratio, na=None, nb=None):
+    """Exact nearest-neighbour ratio matching with one matrix product (fast for ~1000 features)."""
+    if len(da) < 2 or len(db) < 2:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64)
+    na = (da * da).sum(1) if na is None else na
+    nb = (db * db).sum(1) if nb is None else nb
+    d2 = na[:, None] + nb[None, :] - 2.0 * (da @ db.T)
+    two = np.argpartition(d2, 1, axis=1)[:, :2]
+    r = np.arange(len(da))
+    a0, a1 = d2[r, two[:, 0]], d2[r, two[:, 1]]
+    first = np.where(a0 <= a1, two[:, 0], two[:, 1])
+    b1 = np.maximum(np.minimum(a0, a1), 0)
+    b2 = np.maximum(np.maximum(a0, a1), 0)
+    ok = np.sqrt(b1) < ratio * np.sqrt(b2)
+    return _unique(r[ok].astype(np.int64), first[ok].astype(np.int64), b1[ok].astype(np.float32))
+
+
 def _unique(q, t, dd):
     if len(q) == 0:
         return q, t
@@ -94,28 +111,39 @@ def _unique(q, t, dd):
 def _guided(A, B, Hm, radius, kc, ratio):
     """Match all features of A to spatially-predicted candidates in B."""
     pred = cv2.perspectiveTransform(A["und"].reshape(-1, 1, 2).astype(np.float64), Hm).reshape(-1, 2)
-    tree = _tree(B)
     nb = len(B["und"])
+    # only features predicted to land inside B (with a margin) can match
+    Wb, Hb = B["wh"]
+    inside = np.nonzero((pred[:, 0] > -radius) & (pred[:, 0] < Wb + radius)
+                        & (pred[:, 1] > -radius) & (pred[:, 1] < Hb + radius))[0]
+    if len(inside) == 0:
+        return np.zeros(0, np.int64), np.zeros(0, np.int64)
+    tree = _tree(B)
     kc = min(kc, nb)
-    dist, idx = tree.query(pred, k=kc, distance_upper_bound=radius)
+    dist, idx = tree.query(pred[inside], k=kc, distance_upper_bound=radius)
     if kc == 1:
         idx = idx[:, None]
     valid = idx < nb
+    has = valid.any(1)
+    inside, idx, valid = inside[has], idx[has], valid[has]
     idx = np.where(valid, idx, 0)
     qs, ts, ds = [], [], []
-    for s0 in range(0, len(pred), 1500):
-        sl = slice(s0, s0 + 1500)
-        da = A["desc"][sl]
+    for s0 in range(0, len(inside), 1024):
+        sl = slice(s0, s0 + 1024)
+        da = A["desc"][inside[sl]]
         cand = B["desc"][idx[sl]]  # (n,k,128)
-        d2 = A["norm"][sl, None] + B["norm"][idx[sl]] - 2 * np.einsum("nd,nkd->nk", da, cand)
+        d2 = A["norm"][inside[sl], None] + B["norm"][idx[sl]] - 2 * np.matmul(cand, da[:, :, None])[:, :, 0]
         d2 = np.where(valid[sl], np.maximum(d2, 0), np.inf)
-        o = np.argsort(d2, axis=1)[:, :2]
+        o = np.argpartition(d2, 1, axis=1)[:, :2] if d2.shape[1] > 2 else np.argsort(d2, axis=1)[:, :2]
         r = np.arange(d2.shape[0])
-        b1 = d2[r, o[:, 0]]
-        b2 = d2[r, o[:, 1]] if d2.shape[1] > 1 else np.full(len(r), np.inf)
+        a0 = d2[r, o[:, 0]]
+        a1 = d2[r, o[:, 1]] if d2.shape[1] > 1 else np.full(len(r), np.inf)
+        best = np.where(a0 <= a1, o[:, 0], o[:, 1]) if d2.shape[1] > 1 else o[:, 0]
+        b1 = np.minimum(a0, a1)
+        b2 = np.maximum(a0, a1)
         ok = np.isfinite(b1) & (np.sqrt(b1) < ratio * np.sqrt(b2))
-        qs.append(np.arange(s0, s0 + d2.shape[0])[ok])
-        ts.append(idx[sl][r[ok], o[ok, 0]])
+        qs.append(inside[sl][ok])
+        ts.append(idx[sl][r[ok], best[ok]])
         ds.append(b1[ok])
     q = np.concatenate(qs)
     t = np.concatenate(ts)
@@ -179,7 +207,7 @@ def match_pair(task):
         # ---- stage 1: strongest features -> coarse homography -> guided matching
         n1 = c.get("n_coarse", 1500)
         if c.get("guided", True) and len(ui) > n1 // 2:
-            q1, t1 = _ratio_match(A["desc"][:n1], B["desc"][:n1], 0.85, 32)
+            q1, t1 = _ratio_match_bf(A["desc"][:n1], B["desc"][:n1], 0.85, A["norm"][:n1], B["norm"][:n1])
             if use_prior and len(q1):
                 pred, ok = _predict(ui[q1], i, j)
                 m = ok & (np.linalg.norm(pred - uj[t1], axis=1) < tol)

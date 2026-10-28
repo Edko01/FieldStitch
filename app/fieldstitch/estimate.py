@@ -13,16 +13,36 @@ import numpy as np
 from .exif import camera_key
 from .sysinfo import worker_count
 
-# Costs in "worker-seconds" (seconds of one effective core). Measured on a 5,429-photo Matrice 4E job
-# (i9-14900HX) and a 56-photo M4E set; render cost has a per-photo part (decoding) and a per-pixel part.
-FEATURE_WS = {"fast": 0.79, "balanced": 1.04, "accurate": 3.9}     # per photo (not cached)
-MATCH_WS = {"fast": 0.33, "balanced": 0.45, "accurate": 0.82}      # per photo
-ALIGN_S = {"fast": 0.03, "balanced": 0.04, "accurate": 0.06}       # per photo on the reference PC (mostly serial)
-RENDER_WS_PER_PHOTO = 0.34
-RENDER_WS_PER_MPX = 0.14
-OVERVIEW_S_PER_MPX = 0.03                                          # mostly single threaded (GDAL)
+# Costs in "worker-seconds" (seconds of one effective core), measured on a 5,429-photo Matrice 4E
+# job on an i9-14900HX (Balanced, full resolution, 38 min in 1.3.0) and scaled by the speed-ups
+# in 1.5.0. Rendering has a per-photo part (decoding) and a per-output-pixel part.
+FEATURE_WS = {"fast": 1.2, "balanced": 1.6, "accurate": 6.0}       # per photo, CPU SIFT
+FEATURE_WS_GPU = 0.4                                               # per photo with an NVIDIA GPU (decoding)
+MATCH_WS = {"fast": 0.3, "balanced": 0.4, "accurate": 0.75}        # per photo
+ALIGN_S = {"fast": 0.045, "balanced": 0.065, "accurate": 0.1}      # per photo on the reference PC
+RENDER_WS_PER_PHOTO = 0.75
+RENDER_WS_PER_MPX = 0.17
+OVERVIEW_S_PER_MPX = 0.004
 FIXED_S = 20
 REF_WORKERS = 31
+
+
+_GPU = []
+
+
+def gpu_likely():
+    """True when the GPU libraries are installed and Windows reports an NVIDIA card."""
+    if not _GPU:
+        ok = False
+        try:
+            import importlib.util
+            if importlib.util.find_spec("cupy") is not None and not os.environ.get("FIELDSTITCH_NO_GPU"):
+                from .sysinfo import gpus
+                ok = any("nvidia" in (g.get("name") or "").lower() for g in gpus())
+        except Exception:
+            ok = False
+        _GPU.append(ok)
+    return _GPU[0]
 
 
 def effective_workers(w):
@@ -144,9 +164,11 @@ def estimate(proj, settings, cached_features=0, workers=None, area_m2=None):
     rel = effective_workers(REF_WORKERS) / eff        # how much slower than the reference PC
     todo = max(0, n - int(cached_features))
     cal = _calibration()
+    use_gpu = str(settings.get("gpu", "auto")).lower() != "off" and gpu_likely()
+    fws = FEATURE_WS_GPU if use_gpu else FEATURE_WS.get(preset, 1.6)
     stages = {
-        "features": todo * FEATURE_WS.get(preset, 1.04) / eff + 3,
-        "matching": n * MATCH_WS.get(preset, 0.45) / eff,
+        "features": todo * fws / eff + 3,
+        "matching": n * MATCH_WS.get(preset, 0.4) / eff,
         "alignment": n * ALIGN_S.get(preset, 0.04) * min(rel, 4.0) * 0.8 + FIXED_S * 0.6,
         "surface": n * ALIGN_S.get(preset, 0.04) * min(rel, 4.0) * 0.2 + FIXED_S * 0.2,
         "ortho": (n * RENDER_WS_PER_PHOTO + mpx * RENDER_WS_PER_MPX) / eff
@@ -157,4 +179,5 @@ def estimate(proj, settings, cached_features=0, workers=None, area_m2=None):
     return {"ok": True, "photos": n, "gsd_native_cm": round(gsd_n * 100, 2), "gsd_cm": round(gsd * 100, 2),
             "flight_agl_m": round(agl, 1), "area_ha": round(area / 1e4, 1), "mpx": round(mpx, 1),
             "size_bytes": int(size), "seconds": int(secs), "cached_features": int(cached_features),
-            "stages": {k: round(v, 1) for k, v in stages.items()}}
+            "stages": {k: round(v, 1) for k, v in stages.items()}, "gpu": use_gpu,
+            "gpu_available": gpu_likely()}

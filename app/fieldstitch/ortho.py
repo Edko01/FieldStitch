@@ -164,6 +164,7 @@ def init_render(ctx_file):
     global _RCTX
     with open(ctx_file, "rb") as f:
         _RCTX = pickle.load(f)
+    _RCTX["bboxes"] = np.array([cam["bbox"] for cam in _RCTX["cams"]], np.float64).reshape(-1, 4)
     try:
         cv2.setNumThreads(1)
     except Exception:
@@ -199,9 +200,17 @@ def _smoothstep(x):
 
 
 def render_tile(tile):
-    """tile: (tx, ty, tw, th) in output pixels. Returns (tile, rgb uint8, alpha uint8)."""
+    """Single tile (kept for tests). Returns (tile, rgb uint8, alpha uint8)."""
+    return render_region(tile, [tile])[0]
+
+
+def render_region(region, tiles):
+    """Render a block of output pixels photo by photo (each photo decoded once for the block) and
+    cut it into the given tiles. region/tiles: (tx, ty, tw, th) in output pixels.
+    Returns [(tile, rgb uint8, alpha uint8, half_rgb, half_alpha)] where half_* is the tile at
+    half resolution (for the overview file)."""
     c = _RCTX
-    tx, ty, tw, th = tile
+    tx, ty, tw, th = region
     gsd = c["gsd"]
     step = c["coarse_step"]
     ncx = int(math.ceil(tw / step)) + 1
@@ -213,42 +222,49 @@ def render_tile(tile):
     EE, NN = np.meshgrid(E, N)
     ZZ = sample_dsm(c["dsm"], EE, NN)
     P = np.c_[EE.ravel(), NN.ravel(), ZZ.ravel()]
-    # tile bbox in ground coordinates
     e0, e1 = E[0] - gsd, E[-1] + gsd
     n1, n0 = N[0] + gsd, N[-1] - gsd
-    cand = []
-    for ci, cam in enumerate(c["cams"]):
-        bx0, by0, bx1, by1 = cam["bbox"]
-        if bx1 < e0 or bx0 > e1 or by1 < n0 or by0 > n1:
-            continue
-        cand.append(ci)
-    rgb = np.zeros((th, tw, 3), np.uint8)
-    alpha = np.zeros((th, tw), np.uint8)
+    bb = c["bboxes"]
+    cand = np.nonzero(~((bb[:, 2] < e0) | (bb[:, 0] > e1) | (bb[:, 3] < n0) | (bb[:, 1] > n1)))[0].tolist()
+    empty = [(t, np.zeros((t[3], t[2], 3), np.uint8), np.zeros((t[3], t[2]), np.uint8)) for t in tiles]
     if not cand:
-        return tile, rgb, alpha
+        return [_with_half(*e) for e in empty]
     nc = len(cand)
     scores = np.full((nc, P.shape[0]), np.inf)
     U = np.zeros((nc, P.shape[0]), np.float32)
     V = np.zeros((nc, P.shape[0]), np.float32)
     FADE = np.zeros((nc, P.shape[0]))
+    gidx = np.arange(P.shape[0]).reshape(ncy, ncx)
     for a, ci in enumerate(cand):
         cam = c["cams"][ci]
-        u, v, z = project_pts(cam["R"], cam["C"], cam["k"], P)
+        # only grid points inside this photo's footprint box
+        bx0, by0, bx1, by1 = bb[ci]
+        j0 = max(0, int(np.searchsorted(E, bx0 - gsd * step)))
+        j1 = min(ncx, int(np.searchsorted(E, bx1 + gsd * step)) + 1)
+        i0 = max(0, int(np.searchsorted(-N, -(by1 + gsd * step))))
+        i1 = min(ncy, int(np.searchsorted(-N, -(by0 - gsd * step))) + 1)
+        if j1 <= j0 or i1 <= i0:
+            continue
+        sub = gidx[i0:i1, j0:j1].ravel()
+        Ps = P[sub]
+        u, v, z = project_pts(cam["R"], cam["C"], cam["k"], Ps)
         W, H = cam["W"], cam["H"]
         margin = 1.0
         ok = (z > 0) & (u > margin) & (u < W - 1 - margin) & (v > margin) & (v < H - 1 - margin)
         edge = np.minimum.reduce([u, W - 1 - u, v, H - 1 - v]) / (c["edge_fade"] * max(W, H))
-        hd = np.hypot(P[:, 0] - cam["C"][0], P[:, 1] - cam["C"][1]) / max(cam["agl"], 1.0)
-        scores[a, ok] = hd[ok]
-        U[a] = u
-        V[a] = v
-        FADE[a] = np.where(ok, _smoothstep(edge), 0.0)
+        hd = np.hypot(Ps[:, 0] - cam["C"][0], Ps[:, 1] - cam["C"][1]) / max(cam["agl"], 1.0)
+        sc = np.full(len(sub), np.inf)
+        sc[ok] = hd[ok]
+        scores[a, sub] = sc
+        U[a, sub] = u
+        V[a, sub] = v
+        FADE[a, sub] = np.where(ok, _smoothstep(edge), 0.0)
     best = scores.min(0)
     nviews = np.isfinite(scores).sum(0)
     best = np.where(nviews >= c.get("min_views", 1), best, np.inf)
     covered = np.isfinite(best)
     if not covered.any():
-        return tile, rgb, alpha
+        return [_with_half(*e) for e in empty]
     with np.errstate(invalid="ignore"):
         Wt = np.where(np.isfinite(scores) & covered[None], np.exp(-(scores - best[None]) / c["tau"]), 0.0) * FADE
     Wt[Wt < c.get("w_cut", 0.03)] = 0.0
@@ -262,6 +278,7 @@ def render_tile(tile):
         return cv2.warpAffine(coarse, M, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                               borderMode=cv2.BORDER_REPLICATE)
 
+    # largest contributions first is irrelevant for the sum; keep the cache-friendly order
     for a, ci in enumerate(cand):
         wa = Wt[a].reshape(ncy, ncx)
         if wa.max() <= 0:
@@ -289,18 +306,44 @@ def render_tile(tile):
         _T["warp"] += time.perf_counter() - tw0
         g = c["cams"][ci]["gain"]
         w3 = cv2.merge([w_f * g[2], w_f * g[1], w_f * g[0]])  # BGR gains folded into the weights
-        acc[r0:r1, c0:c1] += cv2.multiply(samp, w3, dtype=cv2.CV_32F)
-        wsum[r0:r1, c0:c1] += w_f
+        av = acc[r0:r1, c0:c1]
+        cv2.add(av, cv2.multiply(samp, w3, dtype=cv2.CV_32F), dst=av)
+        wv = wsum[r0:r1, c0:c1]
+        cv2.add(wv, w_f, dst=wv)
     # smooth coverage edge: interpolate the coarse coverage indicator and cut at 0.5
     cov = covered.reshape(ncy, ncx).astype(np.float32)
     cov_f = upsample(cov, 0, 0, th, tw)
-    valid = (wsum > 1e-4) & (cov_f >= 0.5)
-    out = acc / np.maximum(wsum, 1e-6)[..., None]
+    valid = cv2.bitwise_and((wsum > 1e-4).view(np.uint8), (cov_f >= 0.5).view(np.uint8))
+    inv = cv2.divide(1.0, cv2.max(wsum, 1e-6))
+    out = cv2.multiply(acc, cv2.merge([inv, inv, inv]))
+    rgb = cv2.cvtColor(cv2.convertScaleAbs(out), cv2.COLOR_BGR2RGB)
+    alpha = cv2.multiply(valid, 255)
+    rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
+    res = []
+    for t in tiles:
+        ox, oy = t[0] - tx, t[1] - ty
+        res.append(_with_half(t, np.ascontiguousarray(rgb[oy:oy + t[3], ox:ox + t[2]]),
+                              np.ascontiguousarray(alpha[oy:oy + t[3], ox:ox + t[2]])))
+    return res
+
+
+def half_res(rgb, alpha):
+    """2x downsample averaging only valid pixels (invalid pixels are already 0);
+    valid where at least half of the 2x2 block is."""
+    h, w = alpha.shape
+    size = ((w + 1) // 2, (h + 1) // 2)
+    s = cv2.resize(rgb, size, interpolation=cv2.INTER_AREA).astype(np.float32)
+    a = cv2.resize(alpha, size, interpolation=cv2.INTER_AREA).astype(np.float32)
+    out = cv2.multiply(s, cv2.merge([255.0 / np.maximum(a, 1.0)] * 3))
+    valid = a >= 127.5
     out = np.clip(out + 0.5, 0, 255).astype(np.uint8)
-    rgb = out[..., ::-1]  # to RGB
-    rgb = np.where(valid[..., None], rgb, 0).astype(np.uint8)
-    alpha = (valid * 255).astype(np.uint8)
-    return tile, np.ascontiguousarray(rgb), alpha
+    out[~valid] = 0
+    return out, (valid * 255).astype(np.uint8)
+
+
+def _with_half(tile, rgb, alpha):
+    h_rgb, h_a = half_res(rgb, alpha)
+    return tile, rgb, alpha, h_rgb, h_a
 
 
 def render_worker_main(ctx_file, task_q, res_q):
@@ -321,7 +364,11 @@ def render_worker_main(ctx_file, task_q, res_q):
 
 def render_group(group):
     t0 = time.perf_counter()
-    res = [render_tile(t) for t in group]
+    x0 = min(t[0] for t in group)
+    y0 = min(t[1] for t in group)
+    x1 = max(t[0] + t[2] for t in group)
+    y1 = max(t[1] + t[3] for t in group)
+    res = render_region((x0, y0, x1 - x0, y1 - y0), group)
     if os.environ.get("FIELDSTITCH_TEST_DIE"):
         os._exit(3)  # test hook: simulate a worker being killed
     _T["total"] += time.perf_counter() - t0

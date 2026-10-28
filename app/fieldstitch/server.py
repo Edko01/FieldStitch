@@ -850,6 +850,8 @@ class Handler(BaseHTTPRequestHandler):
                 st["resolution_cm"] = None
             if q.get("compression"):
                 st["compression"] = q["compression"][0]
+            if q.get("gpu"):
+                st["gpu"] = q["gpu"][0]
             return project_estimate(st)
         raise ApiError("Unknown request")
 

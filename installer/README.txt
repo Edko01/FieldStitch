@@ -1,4 +1,4 @@
-FIELDSTITCH 1.4  -  offline orthomosaics from drone photos
+FIELDSTITCH 1.5  -  offline orthomosaics from drone photos
 =========================================================
 
 Builds a georeferenced orthomosaic (GeoTIFF) from a folder of nadir mapping
@@ -71,9 +71,12 @@ Projects   The grid button at the top left lists your projects with a
 
 OUTPUT FILES  (in the project's "outputs" folder)
 -------------------------------------------------
-  <name>_orthomosaic.tif   the full mosaic, GeoTIFF, WGS84 / UTM zone,
-                           tiled with overviews (opens fast in QGIS, ArcGIS,
-                           Global Mapper, SMS, etc.)
+  <name>_orthomosaic.tif   the full mosaic, GeoTIFF, WGS84 / UTM zone, tiled
+  <name>_orthomosaic.tif.ovr  its overviews (zoomed-out levels). Keep the two
+                           files together: QGIS, ArcGIS, Global Mapper, SMS
+                           etc. use the .ovr automatically to open fast. For a
+                           single self-contained file, use Export > Whole
+                           orthomosaic.
   <name>_surface.tif       coarse elevation surface used for the mosaic
   report.json              processing statistics
   preview.png              small preview image
@@ -93,13 +96,17 @@ GETTING THE BEST RESULT
     up. Over trees or buildings it includes normal 3D lean.
 
 
-SPEED AND MEMORY (rough guide, 8-core laptop, 16-32 GB RAM)
------------------------------------------------------------
-  Matrice 4E 20 MP photos, Balanced:
-     300 photos  ~ 3-5 min      1,000 photos ~ 10-15 min
-  Fast is roughly 40% quicker. 16 GB RAM is the practical minimum for
-  1,000+ photo jobs. The project's "work" folder holds cached
-  intermediate data; delete it after you are done to free space.
+SPEED AND MEMORY
+----------------
+  FieldStitch uses all CPU cores, and an NVIDIA graphics card (GeForce RTX,
+  Quadro/RTX A-series) when there is one: feature detection runs on the
+  card while the CPU decodes photos. Other PCs process on the CPU only.
+  The Processing options window shows the expected time for the job on
+  this PC, and the estimate learns the PC's speed after each job.
+  16 GB RAM is the practical minimum for
+  1,000+ photo jobs; 32 GB is better. The project's "work" folder holds
+  cached intermediate data; delete it after you are done to free space.
+  Advanced > "Use the NVIDIA graphics card" turns the GPU off if needed.
 
 
 UPDATES

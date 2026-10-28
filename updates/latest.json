@@ -1,8 +1,8 @@
 {
- "version": "1.4.0",
- "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.4.0.zip",
- "sha256": "ac4b686c1fae557b0998a4ab15806de546a5f1ae3944643e8b70c65e591ab35b",
- "notes": "New Pix4Dfields-style workflow:\n- Opens straight onto the map. Import a folder or individual photos and the project is created and named after the folder; click the name at the top to rename it.\n- Import details list photos that will be skipped (no GPS, tilted, other camera) and ignore thumbnails and old project folders.\n- Open an existing GeoTIFF to split and export it without processing.\n- Processing options window: Fast / Balanced / Accurate plus a resolution slider, with the area, file size and processing time shown before you start. Time estimates learn this PC's speed after each job.\n- Status bar along the bottom with progress, time left and Stop processing; the progress bar now moves in step with real time.\n- Separate Export window: whole orthomosaic and/or areas, Compact or Lossless, 100 / 50 / 25 % resolution, overviews on or off, with the size shown up front.\n- Projects page with previews (grid button at top left).",
+ "version": "1.5.0",
+ "runtime": 2,
+ "app_zip": "updates/fieldstitch-app-1.5.0.zip",
+ "sha256": "0ca567cd300ad3f96bfb9be15f3647fca6c4d05c0da550d35c5a6cc2cbd6758d",
+ "notes": "FieldStitch 1.5.0 - faster processing and NVIDIA GPU support. This update needs the new installer (it adds the GPU libraries); your projects are kept.\n- Feature detection runs on an NVIDIA graphics card when there is one, alongside the CPU.\n- Matching about 2x faster, bundle adjustment and surface steps faster, using all cores.\n- Rendering decodes each photo fewer times; overviews are written while rendering (saved as <name>.tif.ovr next to the orthomosaic) instead of in a long single-core pass at the end.\n- Processing options: 'Use the NVIDIA graphics card' switch; time estimates updated from real jobs.",
  "date": "2026-10-28"
 }

@@ -106,7 +106,12 @@ def triangulate(R, C, rays, oc, op, P):
     mean_d /= np.linalg.norm(mean_d, axis=1, keepdims=True) + 1e-12
     cosang = np.clip((d * mean_d[op]).sum(1), -1, 1)
     ang = np.zeros(P)
-    np.maximum.at(ang, op, np.degrees(np.arccos(cosang)))
+    a_obs = np.degrees(np.arccos(cosang))
+    if len(op) and np.all(op[1:] >= op[:-1]):
+        starts = np.r_[0, np.nonzero(op[1:] != op[:-1])[0] + 1]
+        ang[op[starts]] = np.maximum.reduceat(a_obs, starts)
+    else:
+        np.maximum.at(ang, op, a_obs)
     ang *= 2
     depth = ((X[op] - Cm) * d).sum(1)
     neg = np.zeros(P, bool)
@@ -221,7 +226,7 @@ class Reconstruction:
                                 intr_prior=self.Ip, intr_sigma=self.Is,
                                 optimize_intrinsics=rd.get("optimize_intrinsics", False),
                                 loss_scale=rd.get("loss", 3.0), log=self.log)
-            ba.run(max_iter=rd.get("max_iter", 30), time_limit=time_budget)
+            ba.run(max_iter=rd.get("max_iter", 30), tol=rd.get("tol", 1e-4), time_limit=time_budget)
             self.R, self.C, self.intr = ba.R, ba.C, ba.intr
             # ba sorted observations internally; take its ordering
             img, tid, uv, X = ba.oc, ba.op, ba.uv, ba.X

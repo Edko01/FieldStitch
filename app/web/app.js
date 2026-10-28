@@ -388,6 +388,7 @@ function openOptions() {
   document.querySelectorAll("input[name=compression]").forEach((r) => (r.checked = r.value === s.compression));
   $("optExposure").checked = !!s.exposure_balance;
   $("optTrim").checked = s.trim_edges !== false;
+  $("optGpu").checked = s.gpu !== "off";
   nativeGsdCm = p.est_gsd_cm;
   let f = s.res_factor || PRESET_RES[s.preset] || 1;
   if (s.resolution_cm && nativeGsdCm) f = s.resolution_cm / nativeGsdCm;
@@ -423,6 +424,7 @@ function readOptions() {
     compression: v("compression") || "jpeg",
     exposure_balance: $("optExposure").checked,
     trim_edges: $("optTrim").checked,
+    gpu: $("optGpu").checked ? "auto" : "off",
     res_factor: sliderFactor(),
     resolution_cm: null,
   };
@@ -434,7 +436,7 @@ function requestEstimate() {
     const seq = ++estSeq;
     $("estBox").style.opacity = 0.55;
     try {
-      const e = await api("/api/estimate?preset=" + o.preset + "&res_factor=" + o.res_factor + "&compression=" + o.compression);
+      const e = await api("/api/estimate?preset=" + o.preset + "&res_factor=" + o.res_factor + "&compression=" + o.compression + "&gpu=" + o.gpu);
       if (seq !== estSeq) return;
       $("estBox").style.opacity = 1;
       if (!e.ok) { ["estPhotos", "estArea", "estSize", "estTime"].forEach((id) => ($(id).textContent = "–")); $("estPhotos").textContent = fmt(e.photos || 0); return; }
@@ -444,9 +446,12 @@ function requestEstimate() {
       $("estArea").title = fmt(e.area_ha, 1) + " ha";
       $("estSize").textContent = fmtBytes(e.size_bytes);
       $("estTime").textContent = fmtDur(e.seconds);
-      $("estNote").textContent = e.cached_features
-        ? "Features from an earlier run are reused for " + fmt(e.cached_features) + " photos. Estimates adjust to this computer after each job."
-        : "Estimates adjust to this computer after each job.";
+      const parts = [];
+      if (e.gpu) parts.push("Feature detection runs on the NVIDIA graphics card.");
+      if (e.cached_features) parts.push("Features from an earlier run are reused for " + fmt(e.cached_features) + " photos.");
+      parts.push("Estimates adjust to this computer after each job.");
+      $("estNote").textContent = parts.join(" ");
+      $("gpuRow").hidden = !e.gpu_available;
     } catch (err) { if (seq === estSeq) $("estBox").style.opacity = 1; }
   }, 180);
 }
@@ -934,6 +939,7 @@ function wire() {
   $("btnOptions").onclick = openOptions;
   document.querySelectorAll("input[name=preset]").forEach((r) => (r.onchange = () => { setSliderFactor(PRESET_RES[r.value] || 1); updateResLabel(); requestEstimate(); }));
   $("resSlider").oninput = () => { updateResLabel(); requestEstimate(); };
+  $("optGpu").onchange = requestEstimate;
   document.querySelectorAll("input[name=compression]").forEach((r) => (r.onchange = requestEstimate));
   $("procForm").onsubmit = (e) => {
     if (e.submitter && e.submitter.value === "start") { e.preventDefault(); startProcessing(); }
