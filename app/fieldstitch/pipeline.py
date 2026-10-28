@@ -37,6 +37,21 @@ DEFAULT_SETTINGS = {
 STAGES = [("features", 0.22), ("matching", 0.26), ("alignment", 0.17), ("surface", 0.05), ("ortho", 0.30)]
 
 
+def image_heading(R):
+    """Grid azimuth (deg) of the image-up direction for a camera-from-world rotation."""
+    up = R.T @ np.array([0.0, -1.0, 0.0])
+    return math.degrees(math.atan2(up[0], up[1]))
+
+
+def rotate_heading(Rs, deg, mask):
+    """Turn cameras about the vertical axis by deg (clockwise seen from above)."""
+    c, s_ = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    Wt = np.array([[c, s_, 0.0], [-s_, c, 0.0], [0.0, 0.0, 1.0]]).T
+    out = Rs.copy()
+    out[mask] = Rs[mask] @ Wt
+    return out
+
+
 class Cancelled(Exception):
     pass
 
@@ -353,7 +368,7 @@ def _run(project_dir, prog):
 
     ctx = {"feat_dir": feat_dir, "W": W, "H": H, "K": [Kmat(i) for i in range(n)],
            "dist": [dist_of(i) for i in range(n)], "R": R_gimbal, "C": Cgps, "zg": zg,
-           "has_rot": has_gimbal.copy(), "prior_tol": 0.18, "ransac_thr": max(1.0, 0.6 * reduce),
+           "has_rot": has_gimbal.copy(), "prior_tol": float(os.environ.get("FIELDSTITCH_PRIOR_TOL", "0.18")), "ransac_thr": max(1.0, 0.6 * reduce),
            "min_inliers": 20, "ratio": 0.8, "checks": 48, "use_prior": True,
            "guided": True, "n_coarse": 1500, "guided_radius": 0.03, "guided_k": 24}
     ctx_file = os.path.join(work, "match_ctx.pkl")
@@ -378,7 +393,9 @@ def _run(project_dir, prog):
         cxs = intr0[cam_group, 1]
         cys = intr0[cam_group, 2]
         yaw_est = estimate_yaw_from_pairs(sims, Cgps, cxs, cys, n)
-        gy = np.array([(m["yaw"] or 0) + conv for m in meta])
+        # effective heading of the image "up" direction from the full gimbal rotation (yaw, pitch AND roll;
+        # looking straight down, "yaw X" and "yaw X+180 with roll 180" describe the same camera)
+        gy = np.array([image_heading(R_gimbal[i]) for i in range(n)])
         both = np.isfinite(yaw_est) & has_gimbal
         if both.sum() >= 3:
             d = angdiff(yaw_est[both], gy[both])
@@ -393,9 +410,7 @@ def _run(project_dir, prog):
                 snap = round(mean / 90.0) * 90.0
                 yaw_offset = snap if abs(mean - snap) < 10 else mean
                 log("Gimbal headings are consistently %.0f deg off from the photos - correcting" % yaw_offset)
-                R_gimbal = np.array([rot_from_ypr((m["yaw"] or 0) + conv + yaw_offset, m["pitch"] or -90,
-                                                  m.get("roll") or 0) if has_gimbal[i] else np.eye(3)
-                                     for i, m in enumerate(meta)])
+                R_gimbal = rotate_heading(R_gimbal, yaw_offset, has_gimbal)
                 ctx["R"] = R_gimbal
     ctx["has_rot"] = use_gimbal
     ctx["use_prior"] = True
@@ -422,6 +437,28 @@ def _run(project_dir, prog):
                 prog.set("matching", done / len(pairs), "Matched %d / %d pairs" % (done, len(pairs)))
     log("Matching: %d of %d pairs verified%s" % (len(match_res), len(pairs),
                                                 ", %d errors" % errors if errors else ""))
+    if use_gimbal.any() and len(pairs) > 20 and len(match_res) < 0.6 * len(pairs):
+        log("WARNING: only %d of %d pairs matched using the drone's orientation data - matching again without it"
+            % (len(match_res), len(pairs)))
+        use_gimbal[:] = False
+        ctx["has_rot"] = use_gimbal
+        ctx["use_prior"] = False
+        with open(ctx_file, "wb") as f:
+            pickle.dump(ctx, f)
+        match_res, sims, done, errors = [], [], 0, 0
+        prog.set("matching", 0, "Matching again without orientation data", force=True)
+        with _pool(nworkers, init_worker, ctx_file) as pool:
+            for i, j, q, t, sim, nin in pool.imap(match_pair, pairs, chunksize=8):
+                done += 1
+                if isinstance(sim, tuple) and len(sim) == 2 and sim[0] == "error":
+                    sim = None
+                if q is not None:
+                    match_res.append((i, j, q, t))
+                    if sim:
+                        sims.append((i, j, sim, nin))
+                if done % 20 == 0 or done == len(pairs):
+                    prog.set("matching", done / len(pairs), "Matched %d / %d pairs" % (done, len(pairs)))
+        log("Matching (no orientation data): %d of %d pairs verified" % (len(match_res), len(pairs)))
     T.lap("matching")
     if len(match_res) < max(2, n // 4):
         raise RuntimeError("Too few overlapping photo pairs could be matched (%d). Check overlap / photo set."

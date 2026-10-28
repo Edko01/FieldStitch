@@ -1,8 +1,8 @@
 {
- "version": "1.2.2",
+ "version": "1.2.3",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.2.zip",
- "sha256": "9e312def03e1a46811d32c4b97e7cfc9a4b318656e1348887a0a3157f4f23da3",
- "notes": "- Corrects a consistent gimbal heading offset (e.g. Matrice 4E headings recorded 180 deg off) instead of discarding the gimbal angles, which keeps matching robust\n- Much faster track building on very large jobs (thousands of photos)\n- Includes 1.2.1: timing breakdown and Save diagnostics",
+ "app_zip": "updates/fieldstitch-app-1.2.3.zip",
+ "sha256": "8c1432efd35229ce451f6e89fc397a8015f399e54a3fed2946cae0da4b0382a9",
+ "notes": "- Fixes 1.2.2 failing with \"Too few overlapping photo pairs\" on Matrice 4E jobs: the heading check now reads the camera's full orientation (heading and roll), so M4E photos are no longer wrongly 'corrected'\n- Safety net: if matching with the drone's orientation data goes badly, FieldStitch automatically matches again without it instead of stopping\n- Save diagnostics now shows the full file path",
  "date": "2026-10-27"
 }

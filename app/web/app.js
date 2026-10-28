@@ -631,7 +631,7 @@ function wire() {
   $("btnLog").onclick = showLog;
   $("btnLog2").onclick = showLog;
   const diag = async () => {
-    try { const r = await api("/api/diagnostics", {}); toast("Saved " + r.path.split(/[\\/]/).pop() + " in the project folder.", 6000); }
+    try { const r = await api("/api/diagnostics", {}); toast("Diagnostics saved to " + r.path, 10000); }
     catch (e) { toast(e.message); }
   };
   $("btnDiag").onclick = diag;
