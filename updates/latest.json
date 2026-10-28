@@ -1,8 +1,8 @@
 {
- "version": "1.5.1",
+ "version": "1.5.2",
  "runtime": 2,
- "app_zip": "updates/fieldstitch-app-1.5.1.zip",
- "sha256": "6eeb994df79177b2cc916a4de69b1b4ef8adfb75d891df5406b6868c74a3c513",
- "notes": "FieldStitch 1.5.1 - simpler start:\n- Opens on a Projects page: New project, your recent projects with previews, Open project folder, Open a GeoTIFF.\n- New project window: choose the flight's folder (or individual photos), check or change the project name and where it's saved, then Create project.\n- The processing options open by themselves once the photos are loaded, with any photos that will be skipped listed at the top.\n- Inside a project, the Photos panel only adds more photos to that same project, so different flights don't get mixed.\n- A labeled Projects button at the top, and a pencil next to the project name to rename it.",
+ "app_zip": "updates/fieldstitch-app-1.5.2.zip",
+ "sha256": "0ec06d135e82cd143555920ff9b338520bd8601ec1efc4740e67456241746570",
+ "notes": "FieldStitch 1.5.2 - speed fixes from the Rocking R run:\n- Matching: fixed a slowdown in 1.5.0 where each worker started many extra math threads and they competed for the CPU.\n- Feature detection: the CPU keeps all its workers and the graphics card adds to them, instead of the card taking CPU workers away. The log now shows the card's own timings.\n- Track building is several times faster.\n- Rendering: the GeoTIFF and its overview file are written by separate threads, so the render workers no longer wait for the file to be written.",
  "date": "2026-10-28"
 }

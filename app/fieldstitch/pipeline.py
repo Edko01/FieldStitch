@@ -10,6 +10,12 @@ import traceback
 
 import numpy as np
 
+# Worker processes run side by side on every core, so each must use a single BLAS/OpenMP thread
+# (otherwise 31 workers x 32 BLAS threads swamp the CPU). Children read these when they import
+# numpy; this process already has numpy loaded, so its own threading is unchanged.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 from . import __version__
 from .exif import camera_key
 from .geo import Geo, utm_epsg, rot_from_ypr
@@ -850,8 +856,10 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
     import queue as _queue
     from .features import cpu_worker_main, gpu_worker_main
     n_gpu = int(os.environ.get("FIELDSTITCH_GPU_PROCS", "2"))
-    threads = max(2, int(round(nworkers * 0.35)))
-    n_cpu = max(1, nworkers - n_gpu * threads)
+    # the CPU keeps every worker it would have without a GPU; the GPU workers add to that
+    # (their few decode threads mostly wait on the card)
+    threads = int(os.environ.get("FIELDSTITCH_GPU_THREADS", "3"))
+    n_cpu = max(1, nworkers - n_gpu)
     ctxm = mp.get_context("spawn")
     task_q = ctxm.Queue()
     res_q = ctxm.Queue()
@@ -950,6 +958,8 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     cache_imgs = 6
     per_worker = 600 * 1024 ** 2 + (cache_imgs + 1) * img_bytes
     nworkers = settings.get("workers") or worker_count(per_worker, reserve_bytes=4 * 1024 ** 3)
+    if not settings.get("workers") and nworkers > 8:
+        nworkers -= 2   # leave room for compressing and writing the GeoTIFF in this process
     cache_bytes = int(cache_imgs * img_bytes)
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
            "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
@@ -996,8 +1006,37 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                      for _ in range(nworkers)]
             for pr_ in procs:
                 pr_.start()
-            t_write = 0.0
+            t_write = [0.0]
             remaining = len(groups)
+            # two writer threads (full-resolution file and overview file) so receiving tiles,
+            # compressing and writing overlap; GDAL releases the GIL while it works
+            import queue as _q2
+            import threading as _th
+            wq = {"main": _q2.Queue(maxsize=3), "ovr": _q2.Queue(maxsize=3)}
+            werr = []
+
+            def writer(which):
+                while True:
+                    res_ = wq[which].get()
+                    if res_ is None:
+                        return
+                    if werr:
+                        continue
+                    try:
+                        tw0 = time.time()
+                        for (tx, ty, tw, th), rgb, alpha, h_rgb, h_alpha in res_:
+                            if which == "main":
+                                put(dst, Window(tx, ty, tw, th), rgb, alpha)
+                            else:
+                                put(ovr, Window(tx // 2, ty // 2, h_alpha.shape[1], h_alpha.shape[0]), h_rgb, h_alpha)
+                        if which == "main":
+                            t_write[0] += time.time() - tw0
+                    except Exception as e:  # noqa
+                        werr.append(e)
+
+            wthreads = [_th.Thread(target=writer, args=(k,), daemon=True) for k in ("main", "ovr")]
+            for t_ in wthreads:
+                t_.start()
             try:
                 while remaining:
                     try:
@@ -1014,19 +1053,25 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                     remaining -= 1
                     if T:
                         T.add("render", tt)
-                    tw0 = time.time()
-                    for (tx, ty, tw, th), rgb, alpha, h_rgb, h_alpha in res:
-                        put(dst, Window(tx, ty, tw, th), rgb, alpha)
-                        put(ovr, Window(tx // 2, ty // 2, h_alpha.shape[1], h_alpha.shape[0]), h_rgb, h_alpha)
-                        done += 1
-                        prog.set("ortho", 0.85 * done / len(tiles), "Rendered %d / %d tiles" % (done, len(tiles)))
-                    t_write += time.time() - tw0
+                    if werr:
+                        raise werr[0]
+                    wq["main"].put(res)
+                    wq["ovr"].put(res)
+                    done += len(res)
+                    prog.set("ortho", 0.85 * done / len(tiles), "Rendered %d / %d tiles" % (done, len(tiles)))
             finally:
+                for k in wq:
+                    wq[k].put(None)
+                for t_ in wthreads:
+                    t_.join()
                 for pr_ in procs:
                     if pr_.is_alive():
                         pr_.terminate()
                 for pr_ in procs:
                     pr_.join(timeout=5)
+            if werr:
+                raise werr[0]
+            t_write = t_write[0]
             if T:
                 T.lap("render tiles")
                 T.add("geotiff", {"write": t_write})

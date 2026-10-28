@@ -17,7 +17,7 @@ from .sysinfo import worker_count
 # job on an i9-14900HX (Balanced, full resolution, 38 min in 1.3.0) and scaled by the speed-ups
 # in 1.5.0. Rendering has a per-photo part (decoding) and a per-output-pixel part.
 FEATURE_WS = {"fast": 1.2, "balanced": 1.6, "accurate": 6.0}       # per photo, CPU SIFT
-FEATURE_WS_GPU = 0.4                                               # per photo with an NVIDIA GPU (decoding)
+FEATURE_WS_GPU = 1.3                                               # per photo with an NVIDIA GPU helping the CPU
 MATCH_WS = {"fast": 0.3, "balanced": 0.4, "accurate": 0.75}        # per photo
 ALIGN_S = {"fast": 0.045, "balanced": 0.065, "accurate": 0.1}      # per photo on the reference PC
 RENDER_WS_PER_PHOTO = 0.75

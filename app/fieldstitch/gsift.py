@@ -38,6 +38,17 @@ def to_host(xp, a):
     return a.get() if hasattr(a, "get") else np.asarray(a)
 
 
+def _scatter_sum(xp, idx, w, n):
+    """Sum w into n bins. On the GPU this uses float32 atomics (double-precision atomics, which
+    bincount uses, are very slow on GeForce cards)."""
+    if xp is np:
+        return np.bincount(idx, weights=w, minlength=n).astype(np.float32)
+    import cupyx
+    out = xp.zeros(n, xp.float32)
+    cupyx.scatter_add(out, idx, w.astype(xp.float32, copy=False))
+    return out
+
+
 def _gauss_kernel(sigma):
     k = int(round(sigma * 8 + 1)) | 1
     x = np.arange(k, dtype=np.float64) - (k - 1) / 2.0
@@ -233,7 +244,7 @@ def _orientations(xp, mag, ang, r, c, scl, rows, cols):
     m = mag[yc, xc] * w * valid
     b = xp.rint(ang[yc, xc] * (ORI_BINS / 360.0)).astype(xp.int32) % ORI_BINS
     idx = (xp.arange(n, dtype=xp.int32)[:, None] * ORI_BINS + b).ravel()
-    hist = xp.bincount(idx, weights=m.ravel(), minlength=n * ORI_BINS).reshape(n, ORI_BINS).astype(xp.float32)
+    hist = _scatter_sum(xp, idx, m.ravel(), n * ORI_BINS).reshape(n, ORI_BINS)
     h = (xp.roll(hist, 2, 1) + xp.roll(hist, -2, 1)) * (1.0 / 16) + \
         (xp.roll(hist, 1, 1) + xp.roll(hist, -1, 1)) * (4.0 / 16) + hist * (6.0 / 16)
     hmax = h.max(1, keepdims=True)
@@ -388,7 +399,7 @@ def _descr(xp, mag, ang, px, py, scl, ori, rows, cols):
                           (base + s2 + s1 + 1).ravel()])
     val = xp.concatenate([v000.ravel(), v001.ravel(), v010.ravel(), v011.ravel(),
                           v100.ravel(), v101.ravel(), v110.ravel(), v111.ravel()])
-    hist = xp.bincount(idx, weights=val, minlength=n * HS).reshape(n, d + 2, d + 2, nb + 2).astype(xp.float32)
+    hist = _scatter_sum(xp, idx, val, n * HS).reshape(n, d + 2, d + 2, nb + 2)
     hist[..., 0] += hist[..., nb]
     hist[..., 1] += hist[..., nb + 1]
     dst = hist[:, 1:d + 1, 1:d + 1, :nb].reshape(n, d * d * nb)

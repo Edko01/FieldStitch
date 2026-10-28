@@ -12,7 +12,8 @@ from .camera import undistort_normalized as undistort_normalized_px
 
 # ------------------------------------------------------------------------------ tracks
 def build_tracks(pairs, nfeat, n_img):
-    """pairs: list of (i, j, qi, tj). Returns tid, img, feat arrays (observations) and n_tracks."""
+    """pairs: list of (i, j, qi, tj). Returns tid, img, feat arrays (observations) and n_tracks.
+    Linear-time bookkeeping (bincount / masks) instead of np.unique on tens of millions of entries."""
     nfeat = np.asarray(nfeat, np.int64)
     offsets = np.r_[0, np.cumsum(nfeat)]
     rows = []
@@ -26,22 +27,33 @@ def build_tracks(pairs, nfeat, n_img):
     cols = np.concatenate(cols)
     T = int(offsets[-1])
     G = sp.coo_matrix((np.ones(len(rows), np.int8), (rows, cols)), shape=(T, T))
-    _, lab = connected_components(G, directed=False)
-    nodes = np.unique(np.r_[rows, cols])
+    ncomp, lab = connected_components(G, directed=False)
+    del G
+    used = np.zeros(T, bool)
+    used[rows] = True
+    used[cols] = True
+    del rows, cols
+    nodes = np.flatnonzero(used)
+    del used
     comp = lab[nodes].astype(np.int64)
+    del lab
     img = np.searchsorted(offsets, nodes, side="right") - 1
     feat = nodes - offsets[img]
-    key = comp * n_img + img
-    uk, cnt = np.unique(key, return_counts=True)
-    bad = np.unique(uk[cnt > 1] // n_img)
-    m = ~np.isin(comp, bad)
-    comp, img, feat = comp[m], img[m], feat[m]
-    uc, inv, sizes = np.unique(comp, return_inverse=True, return_counts=True)
-    keep = sizes[inv] >= 2
-    comp, img, feat = inv[keep], img[keep], feat[keep]
-    uc2, tid = np.unique(comp, return_inverse=True)
+    # a track may not contain two features of the same photo: drop such components
+    key = np.sort(comp * n_img + img)
+    dup = key[1:][key[1:] == key[:-1]] // n_img
+    bad = np.zeros(ncomp, bool)
+    bad[dup] = True
+    m = ~bad[comp]
+    sizes = np.bincount(comp[m], minlength=ncomp)
+    keep = m & (sizes[comp] >= 2)
+    comp, img, feat = comp[keep], img[keep], feat[keep]
+    live = np.zeros(ncomp, bool)
+    live[comp] = True
+    remap = np.cumsum(live) - 1
+    tid = remap[comp]
     order = np.argsort(tid, kind="stable")
-    return tid[order], img[order], feat[order], len(uc2)
+    return tid[order], img[order], feat[order], int(live.sum())
 
 
 def select_tracks(tid, img, xy, W, H, n_tracks, per_cell=2, gx=8, gy=6, max_len=8, seed=0):
@@ -249,7 +261,8 @@ class Reconstruction:
 
 
 def _compact(tid, X):
-    used = np.unique(tid)
-    remap = -np.ones(len(X), np.int64)
-    remap[used] = np.arange(len(used))
+    live = np.zeros(len(X), bool)
+    live[tid] = True
+    used = np.flatnonzero(live)
+    remap = np.cumsum(live) - 1
     return remap[tid], X[used]

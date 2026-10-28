@@ -229,6 +229,8 @@ def gpu_worker_main(task_q, res_q, n_threads, wid):
         res_q.put(("gpu_off", wid, "%s: %s" % (type(e).__name__, str(e)[:300])))
 
     if not gpu_ok:
+        n_threads = 1   # the CPU workers already use every core
+
         def cpu_thread():
             while True:
                 task = task_q.get()
@@ -296,8 +298,12 @@ def gpu_worker_main(task_q, res_q, n_threads, wid):
                 tt["photos_gpu"] = 0
                 tt["photos_cpu"] = 1
                 xy, desc, resp, t_desc = sift_cpu(g2, nfeat)
-            tt["detect"] = time.perf_counter() - t2 - t_desc
-            tt["describe"] = t_desc
+            if tt.get("photos_gpu"):
+                tt["gpu_detect"] = time.perf_counter() - t2 - t_desc
+                tt["gpu_describe"] = t_desc
+            else:
+                tt["detect"] = time.perf_counter() - t2 - t_desc
+                tt["describe"] = t_desc
             n = _save(out_npz, xy, desc, resp, g2.shape[1], g2.shape[0])
             res_q.put(("ok", (idx, n, None, tt)))
         except Exception as e:  # noqa
