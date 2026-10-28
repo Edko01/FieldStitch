@@ -124,7 +124,7 @@ def sift_gpu(g2, nfeat, gpu=True):
     lst = [_KP(float(x), float(y), float(r)) for x, y, r in zip(kps["x"], kps["y"], kps["response"])]
     sel = np.array(_spread(lst, w, h, nfeat), np.int64)
     sel = sel[np.argsort(-kps["response"][sel], kind="stable")]
-    desc = gsift.describe(state, kps, sel)
+    desc = gsift.describe(state, kps, sel, budget=4e6 if gpu else 2.5e6)
     xy = np.c_[kps["x"][sel], kps["y"][sel]].astype(np.float32)
     return xy, desc, kps["response"][sel].astype(np.float32), time.perf_counter() - t
 
@@ -198,6 +198,46 @@ def gpu_selftest():
     return True
 
 
+def gpu_benchmark():
+    """Time the GPU on a photo-sized test image (no CPU competition yet) for the log."""
+    from . import gsift
+    import cupy as cp
+    rng = np.random.default_rng(3)
+    img = cv2.resize(cv2.GaussianBlur(rng.integers(0, 255, (248, 330)).astype(np.uint8), (0, 0), 1.2),
+                     (1320, 990), interpolation=cv2.INTER_CUBIC)
+    img = cv2.createCLAHE(2.0, (8, 8)).apply(img)
+    gsift.detect(img, gpu=True, max_kp=11000)          # warm-up
+    tm = {}
+    reps = 3
+    t0 = time.perf_counter()
+    for _ in range(reps):
+        k, st = gsift.detect(img, gpu=True, max_kp=11000, timings=tm)
+        gsift.describe(st, k, np.arange(min(5000, len(k["x"]))), timings=tm)
+    total = (time.perf_counter() - t0) / reps
+    parts = ", ".join("%s %.0f" % (n, 1000 * v / reps) for n, v in tm.items())
+    # rendering building blocks: upload a 20 MP photo and resample it
+    big = np.zeros((3956, 5280, 3), np.uint8)
+    cp.cuda.Stream.null.synchronize()
+    t1 = time.perf_counter()
+    for _ in range(3):
+        g = cp.asarray(big)
+    cp.cuda.Stream.null.synchronize()
+    up = (time.perf_counter() - t1) / 3
+    import cupyx.scipy.ndimage as cndi
+    yy, xx = cp.meshgrid(cp.arange(2048, dtype=cp.float32) * 1.7, cp.arange(2048, dtype=cp.float32) * 2.3, indexing="ij")
+    ch = g[..., 0].astype(cp.float32)
+    cndi.map_coordinates(ch, cp.stack([yy, xx]), order=1)
+    cp.cuda.Stream.null.synchronize()
+    t2 = time.perf_counter()
+    for _ in range(3):
+        for c in range(3):
+            cndi.map_coordinates(g[..., c].astype(cp.float32), cp.stack([yy, xx]), order=1)
+    cp.cuda.Stream.null.synchronize()
+    rs = (time.perf_counter() - t2) / 3
+    return ("benchmark: %.0f ms per photo (%s ms); upload 20 MP photo %.0f ms; resample 4 MP tile %.0f ms"
+            % (1000 * total, parts, 1000 * up, 1000 * rs))
+
+
 def gpu_info():
     import cupy as cp
     n = cp.cuda.runtime.getDeviceCount()
@@ -227,8 +267,15 @@ def gpu_worker_main(task_q, res_q, n_threads, wid):
         info = gpu_info()
         gpu_selftest()
         gpu_ok = True
+        from .sysinfo import raise_priority
+        raise_priority()
         res_q.put(("gpu", wid, "%s (%.1f GB, compute %s), ready in %.0f s"
                    % (info["name"], info["mem_gb"], info["cc"], time.perf_counter() - t0)))
+        if wid == 0:
+            try:
+                res_q.put(("gpu", wid, gpu_benchmark()))
+            except Exception as e:  # noqa
+                res_q.put(("gpu", wid, "benchmark failed: %s" % e))
     except Exception as e:  # noqa
         res_q.put(("gpu_off", wid, "%s: %s" % (type(e).__name__, str(e)[:300])))
 

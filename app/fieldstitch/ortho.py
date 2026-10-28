@@ -211,6 +211,74 @@ def render_region(region, tiles):
     cut it into the given tiles. region/tiles: (tx, ty, tw, th) in output pixels.
     Returns [(tile, rgb uint8, alpha uint8, half_rgb, half_alpha)] where half_* is the tile at
     half resolution (for the overview file)."""
+    plan = region_plan(region, tiles)
+    if plan is None:
+        return [_with_half(t, np.zeros((t[3], t[2], 3), np.uint8), np.zeros((t[3], t[2]), np.uint8)) for t in tiles]
+    c = _RCTX
+    tx, ty, tw, th = region
+    step = plan["step"]
+    ncy, ncx = plan["ncy"], plan["ncx"]
+    cand, Wt, U, V, covered = plan["cand"], plan["Wt"], plan["U"], plan["V"], plan["covered"]
+    acc = np.zeros((th, tw, 3), np.float32)
+    wsum = np.zeros((th, tw), np.float32)
+    r = c["reduce"]
+    upsample = _upsampler(step)
+
+    for a, ci, r0, r1, c0, c1 in plan["items"]:
+        h, w = r1 - r0, c1 - c0
+        wa = Wt[a].reshape(ncy, ncx)
+        w_f = upsample(wa.astype(np.float32), r0, c0, h, w)
+        if w_f.max() <= 0:
+            continue
+        uv = np.dstack([U[a].reshape(ncy, ncx), V[a].reshape(ncy, ncx)]).astype(np.float32)
+        if r != 1:
+            uv = (uv + 0.5) / r - 0.5
+        uv_f = upsample(uv, r0, c0, h, w)
+        img = _get_image(ci)
+        tw0 = time.perf_counter()
+        m1, m2 = cv2.convertMaps(uv_f, None, cv2.CV_16SC2)
+        samp = cv2.remap(img, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        _T["warp"] += time.perf_counter() - tw0
+        g = c["cams"][ci]["gain"]
+        w3 = cv2.merge([w_f * g[2], w_f * g[1], w_f * g[0]])  # BGR gains folded into the weights
+        av = acc[r0:r1, c0:c1]
+        cv2.add(av, cv2.multiply(samp, w3, dtype=cv2.CV_32F), dst=av)
+        wv = wsum[r0:r1, c0:c1]
+        cv2.add(wv, w_f, dst=wv)
+    # smooth coverage edge: interpolate the coarse coverage indicator and cut at 0.5
+    cov = covered.reshape(ncy, ncx).astype(np.float32)
+    cov_f = upsample(cov, 0, 0, th, tw)
+    valid = cv2.bitwise_and((wsum > 1e-4).view(np.uint8), (cov_f >= 0.5).view(np.uint8))
+    inv = cv2.divide(1.0, cv2.max(wsum, 1e-6))
+    out = cv2.multiply(acc, cv2.merge([inv, inv, inv]))
+    rgb = cv2.cvtColor(cv2.convertScaleAbs(out), cv2.COLOR_BGR2RGB)
+    alpha = cv2.multiply(valid, 255)
+    rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
+    return cut_tiles(region, tiles, rgb, alpha)
+
+
+def _upsampler(step):
+    def upsample(coarse, r0, c0, h, w):
+        """Fine-grid bilinear interpolation of coarse samples taken every `step` pixels (exact affine)."""
+        M = np.array([[1.0 / step, 0, c0 / step], [0, 1.0 / step, r0 / step]], np.float64)
+        return cv2.warpAffine(coarse, M, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REPLICATE)
+    return upsample
+
+
+def cut_tiles(region, tiles, rgb, alpha):
+    tx, ty = region[0], region[1]
+    res = []
+    for t in tiles:
+        ox, oy = t[0] - tx, t[1] - ty
+        res.append(_with_half(t, np.ascontiguousarray(rgb[oy:oy + t[3], ox:ox + t[2]]),
+                              np.ascontiguousarray(alpha[oy:oy + t[3], ox:ox + t[2]])))
+    return res
+
+
+def region_plan(region, tiles):
+    """Geometry for a block: which photos contribute where, their blend weights and the photo
+    coordinates on a coarse grid. Shared by the CPU and GPU renderers. None if nothing to draw."""
     c = _RCTX
     tx, ty, tw, th = region
     gsd = c["gsd"]
@@ -228,9 +296,8 @@ def render_region(region, tiles):
     n1, n0 = N[0] + gsd, N[-1] - gsd
     bb = c["bboxes"]
     cand = np.nonzero(~((bb[:, 2] < e0) | (bb[:, 0] > e1) | (bb[:, 3] < n0) | (bb[:, 1] > n1)))[0].tolist()
-    empty = [(t, np.zeros((t[3], t[2], 3), np.uint8), np.zeros((t[3], t[2]), np.uint8)) for t in tiles]
     if not cand:
-        return [_with_half(*e) for e in empty]
+        return None
     nc = len(cand)
     scores = np.full((nc, P.shape[0]), np.inf)
     U = np.zeros((nc, P.shape[0]), np.float32)
@@ -266,21 +333,11 @@ def render_region(region, tiles):
     best = np.where(nviews >= c.get("min_views", 1), best, np.inf)
     covered = np.isfinite(best)
     if not covered.any():
-        return [_with_half(*e) for e in empty]
+        return None
     with np.errstate(invalid="ignore"):
         Wt = np.where(np.isfinite(scores) & covered[None], np.exp(-(scores - best[None]) / c["tau"]), 0.0) * FADE
     Wt[Wt < c.get("w_cut", 0.03)] = 0.0
-    acc = np.zeros((th, tw, 3), np.float32)
-    wsum = np.zeros((th, tw), np.float32)
-    r = c["reduce"]
-
-    def upsample(coarse, r0, c0, h, w):
-        """Fine-grid bilinear interpolation of coarse samples taken every `step` pixels (exact affine)."""
-        M = np.array([[1.0 / step, 0, c0 / step], [0, 1.0 / step, r0 / step]], np.float64)
-        return cv2.warpAffine(coarse, M, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                              borderMode=cv2.BORDER_REPLICATE)
-
-    # largest contributions first is irrelevant for the sum; keep the cache-friendly order
+    items = []
     for a, ci in enumerate(cand):
         wa = Wt[a].reshape(ncy, ncx)
         if wa.max() <= 0:
@@ -293,40 +350,9 @@ def render_region(region, tiles):
         c1 = min(tw, (cols[-1] + 1) * step + 1)
         if r1 <= r0 or c1 <= c0:
             continue
-        h, w = r1 - r0, c1 - c0
-        w_f = upsample(wa.astype(np.float32), r0, c0, h, w)
-        if w_f.max() <= 0:
-            continue
-        uv = np.dstack([U[a].reshape(ncy, ncx), V[a].reshape(ncy, ncx)]).astype(np.float32)
-        if r != 1:
-            uv = (uv + 0.5) / r - 0.5
-        uv_f = upsample(uv, r0, c0, h, w)
-        img = _get_image(ci)
-        tw0 = time.perf_counter()
-        m1, m2 = cv2.convertMaps(uv_f, None, cv2.CV_16SC2)
-        samp = cv2.remap(img, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        _T["warp"] += time.perf_counter() - tw0
-        g = c["cams"][ci]["gain"]
-        w3 = cv2.merge([w_f * g[2], w_f * g[1], w_f * g[0]])  # BGR gains folded into the weights
-        av = acc[r0:r1, c0:c1]
-        cv2.add(av, cv2.multiply(samp, w3, dtype=cv2.CV_32F), dst=av)
-        wv = wsum[r0:r1, c0:c1]
-        cv2.add(wv, w_f, dst=wv)
-    # smooth coverage edge: interpolate the coarse coverage indicator and cut at 0.5
-    cov = covered.reshape(ncy, ncx).astype(np.float32)
-    cov_f = upsample(cov, 0, 0, th, tw)
-    valid = cv2.bitwise_and((wsum > 1e-4).view(np.uint8), (cov_f >= 0.5).view(np.uint8))
-    inv = cv2.divide(1.0, cv2.max(wsum, 1e-6))
-    out = cv2.multiply(acc, cv2.merge([inv, inv, inv]))
-    rgb = cv2.cvtColor(cv2.convertScaleAbs(out), cv2.COLOR_BGR2RGB)
-    alpha = cv2.multiply(valid, 255)
-    rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
-    res = []
-    for t in tiles:
-        ox, oy = t[0] - tx, t[1] - ty
-        res.append(_with_half(t, np.ascontiguousarray(rgb[oy:oy + t[3], ox:ox + t[2]]),
-                              np.ascontiguousarray(alpha[oy:oy + t[3], ox:ox + t[2]])))
-    return res
+        items.append((a, ci, int(r0), int(r1), int(c0), int(c1)))
+    return {"cand": cand, "Wt": Wt, "U": U, "V": V, "covered": covered, "ncy": ncy, "ncx": ncx,
+            "step": step, "items": items}
 
 
 def half_res(rgb, alpha):

@@ -1,8 +1,8 @@
 {
- "version": "1.5.3",
+ "version": "1.5.4",
  "runtime": 2,
- "app_zip": "updates/fieldstitch-app-1.5.3.zip",
- "sha256": "1829a598f5e5177301195bb6e771dc3ef317f49446a48769d1e52d28e597f3f3",
- "notes": "FieldStitch 1.5.3 - full CPU use:\n- Processing workers now tell Windows they are not background work. Windows 11 throttles windowless background processes (\"efficiency mode\"), which can hold them to the slower efficiency cores at low clock speeds.\n- The log's timing summary now shows how busy the CPU was during each step, so slow steps are easy to spot.\nIncludes 1.5.2: matching slowdown fix, the CPU keeps all workers when the graphics card helps, faster track building, threaded GeoTIFF writing.",
+ "app_zip": "updates/fieldstitch-app-1.5.4.zip",
+ "sha256": "14b8f59d09f4eacb8b49d4d0a74f6e1e5039753969d57e1052ad9c26f8018c53",
+ "notes": "FieldStitch 1.5.4 - more work on the NVIDIA graphics card:\n- Rendering: a GPU worker now warps and blends photos on the card alongside the CPU workers. Its first block is rendered on both and compared before the card is trusted; any problem falls back to the CPU.\n- Feature detection on the card restructured to do each photo in a few large steps instead of thousands of small ones, and the processes feeding the card get priority so they aren't starved when the CPU is busy.\n- The log now records a short GPU benchmark at the start, how busy the card was during features and rendering, and why Windows refused the background-throttling setting if it does.",
  "date": "2026-10-28"
 }

@@ -102,7 +102,7 @@ class Timer:
             if group == "render" and "total" in d:
                 d = dict(d)
                 d["blend & other"] = max(0.0, d["total"] - d.get("read", 0) - d.get("decode", 0) - d.get("warp", 0))
-            parts = ", ".join(("%s %d" % (k, v)) if k.startswith("photos") else ("%s %.1f s" % (k, v))
+            parts = ", ".join(("%s %d" % (k, v)) if k.startswith(("photos", "gpu_blocks")) else ("%s %.1f s" % (k, v))
                               for k, v in d.items() if k not in ("bytes", "loads"))
             extra = ""
             if d.get("bytes") and d.get("read"):
@@ -281,7 +281,9 @@ def _run(project_dir, prog):
             sysd.get("project_drive"), sysd.get("project_free_gb")))
     if sys.platform == "win32":
         from .sysinfo import full_speed
-        log("Windows background throttling: %s" % ("off for processing" if full_speed() else "could not be changed"))
+        from .sysinfo import FULL_SPEED_ERR
+        log("Windows background throttling: %s" % ("off for processing" if full_speed()
+                                                   else "could not be changed (%s)" % FULL_SPEED_ERR[0]))
 
     # ---------------------------------------------------------------- select photos
     photos = proj["photos"]
@@ -874,7 +876,8 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
     # the CPU keeps every worker it would have without a GPU; the GPU workers add to that
     # (their few decode threads mostly wait on the card)
     threads = int(os.environ.get("FIELDSTITCH_GPU_THREADS", "3"))
-    n_cpu = max(1, nworkers - n_gpu)
+    # one core per GPU worker is left free so the processes feeding the card are never starved
+    n_cpu = max(1, nworkers - 2 * n_gpu)
     ctxm = mp.get_context("spawn")
     task_q = ctxm.Queue()
     res_q = ctxm.Queue()
@@ -888,6 +891,8 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
     log("Features: %d GPU workers (%d decode threads each) + %d CPU workers" % (n_gpu, threads, n_cpu))
     for p_ in procs:
         p_.start()
+    from .sysinfo import GpuMonitor
+    mon = GpuMonitor()
     remaining = len(tasks)
     gpu_msgs = set()
     try:
@@ -910,6 +915,10 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
                     gpu_msgs.add(msg)
                     log(msg)
     finally:
+        g = mon.stop()
+        if g:
+            log("GPU busy during features: average %.0f%%, peak %.0f%%, memory up to %.1f GB"
+                % (g["avg_util"], g["max_util"], g["max_mem_mb"] / 1024))
         for p_ in procs:
             p_.join(timeout=10)
             if p_.is_alive():
@@ -985,7 +994,13 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     ctx_file = os.path.join(work, "render_ctx.pkl")
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
-    log("Rendering %d tiles with %d workers (photo decode 1/%d)" % (len(tiles), nworkers, reduce))
+    n_gpu_r = 1 if (gpu_wanted(settings) and len(groups) >= 8) else 0
+    gpu_threads = 8
+    if n_gpu_r:
+        # the GPU worker's decode threads need CPU time too
+        nworkers = max(1, nworkers - 4)
+    log("Rendering %d tiles with %d workers%s (photo decode 1/%d)"
+        % (len(tiles), nworkers, " + 1 GPU worker" if n_gpu_r else "", reduce))
     transform = Affine(gsd, 0, ox0 + origin[0], 0, -gsd, oy1 + origin[1])
     prof = ortho_profile(out_w, out_h, epsg, transform, settings)
     hw, hh = (out_w + 1) // 2, (out_h + 1) // 2
@@ -1017,10 +1032,16 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             seg = max(1, min(4, int(round(len(groups) / float(nworkers * 3)))))
             for i0 in range(0, len(groups), seg):
                 task_q.put(groups[i0:i0 + seg])
-            for _ in range(nworkers):
+            for _ in range(nworkers + n_gpu_r):
                 task_q.put(None)
             procs = [ctxm.Process(target=render_worker_main, args=(ctx_file, task_q, res_q), daemon=True)
                      for _ in range(nworkers)]
+            if n_gpu_r:
+                from .gpurender import gpu_render_worker_main
+                procs.append(ctxm.Process(target=gpu_render_worker_main, args=(ctx_file, task_q, res_q, gpu_threads),
+                                          daemon=True))
+                from .sysinfo import GpuMonitor
+                gmon = GpuMonitor()
             for pr_ in procs:
                 pr_.start()
             t_write = [0.0]
@@ -1066,6 +1087,9 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                         continue
                     if item[0] == "error":
                         raise RuntimeError("Rendering failed: " + item[1])
+                    if item[0] in ("gpu", "gpu_off"):
+                        log(("GPU: " if item[0] == "gpu" else "GPU not used: ") + item[1])
+                        continue
                     _, res, tt = item
                     remaining -= 1
                     if T:
@@ -1089,6 +1113,11 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             if werr:
                 raise werr[0]
             t_write = t_write[0]
+            if n_gpu_r:
+                gs = gmon.stop()
+                if gs:
+                    log("GPU busy during rendering: average %.0f%%, peak %.0f%%, memory up to %.1f GB"
+                        % (gs["avg_util"], gs["max_util"], gs["max_mem_mb"] / 1024))
             if T:
                 T.lap("render tiles")
                 T.add("geotiff", {"write": t_write})
