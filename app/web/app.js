@@ -630,6 +630,12 @@ function wire() {
   $("btnCancel").onclick = async () => { if (confirm("Stop processing? Finished steps are kept and reused next time.")) { await api("/api/process/cancel", {}); refresh(); } };
   $("btnLog").onclick = showLog;
   $("btnLog2").onclick = showLog;
+  const diag = async () => {
+    try { const r = await api("/api/diagnostics", {}); toast("Saved " + r.path.split(/[\\/]/).pop() + " in the project folder.", 6000); }
+    catch (e) { toast(e.message); }
+  };
+  $("btnDiag").onclick = diag;
+  $("btnDiag2").onclick = diag;
   $("logClose").onclick = () => ($("logDrawer").hidden = true);
   $("btnOutputs").onclick = () => api("/api/open_path", { path: result && result.outputs_dir });
 

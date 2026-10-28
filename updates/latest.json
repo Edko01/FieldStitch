@@ -1,8 +1,8 @@
 {
- "version": "1.2.0",
+ "version": "1.2.1",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.0.zip",
- "sha256": "c42f90899ca683363847db7b545e25ef2fb27b4684383d1fab1554a53b31921f",
- "notes": "- FieldStitch now installs like a normal Windows program (Setup, Start menu, desktop icon, uninstaller)\n- Opens in its own window with no console; closes itself when the window is closed and nothing is processing\n- Opening FieldStitch again while it's running brings up the existing session",
+ "app_zip": "updates/fieldstitch-app-1.2.1.zip",
+ "sha256": "f52285a3460f912878e721dcf8f365027f4e8d6a20f2e76e8cfade356779ef68",
+ "notes": "- Every job now records a timing breakdown and your PC's hardware in the log and report\n- New Save diagnostics button: one small file with the log and timings to send for support or speed tuning",
  "date": "2026-10-27"
 }

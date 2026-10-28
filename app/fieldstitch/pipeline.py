@@ -41,6 +41,44 @@ class Cancelled(Exception):
     pass
 
 
+class Timer:
+    """Wall-clock time per stage plus summed worker CPU time per sub-step."""
+
+    def __init__(self):
+        self.t = time.time()
+        self.stages = []
+        self.workers = {}
+
+    def lap(self, name):
+        now = time.time()
+        self.stages.append((name, now - self.t))
+        self.t = now
+
+    def add(self, group, d):
+        g = self.workers.setdefault(group, {})
+        for k, v in d.items():
+            g[k] = g.get(k, 0) + v
+
+    def summary(self, log):
+        total = sum(v for _, v in self.stages) or 1.0
+        log("Timing summary (wall clock):")
+        for name, v in self.stages:
+            log("  %-26s %7.1f s  %4.1f%%" % (name, v, 100 * v / total))
+        for group, d in self.workers.items():
+            if group == "render" and "total" in d:
+                d = dict(d)
+                d["blend & other"] = max(0.0, d["total"] - d.get("read", 0) - d.get("decode", 0) - d.get("warp", 0))
+            parts = ", ".join("%s %.1f s" % (k, v) for k, v in d.items() if k not in ("bytes", "loads"))
+            extra = ""
+            if d.get("bytes") and d.get("read"):
+                extra = " | read %.0f MB at %.0f MB/s per worker" % (d["bytes"] / 1e6, d["bytes"] / 1e6 / max(d["read"], 1e-6))
+            log("  %s worker time: %s%s" % (group, parts, extra))
+
+    def as_dict(self):
+        return {"stages": [[n, round(v, 2)] for n, v in self.stages],
+                "workers": {g: {k: round(v, 2) for k, v in d.items()} for g, d in self.workers.items()}}
+
+
 class Progress:
     def __init__(self, project_dir):
         self.path = os.path.join(project_dir, "progress.json")
@@ -140,8 +178,16 @@ def _run(project_dir, prog):
     for d in (work, feat_dir, thumb_dir, out_dir):
         os.makedirs(d, exist_ok=True)
     t_start = time.time()
+    T = Timer()
     log("FieldStitch %s - project '%s'" % (__version__, proj.get("name")))
     log("Preset: %s | RAM %.1f GB | CPUs %d" % (settings["preset"], total_ram_bytes() / 1e9, os.cpu_count() or 1))
+    from .sysinfo import describe
+    sysd = describe(project_dir, proj.get("folders") or [])
+    log("System: %s | %s | %s" % (sysd.get("cpu"), sysd.get("os"),
+        "; ".join("%s (%s GB)" % (g.get("name"), g.get("memory_gb")) for g in sysd.get("gpus", [])) or "GPU: n/a"))
+    if sysd.get("photo_drives"):
+        log("Photo drive type: %s | project drive: %s, %s GB free" % (", ".join(sysd["photo_drives"]),
+            sysd.get("project_drive"), sysd.get("project_free_gb")))
 
     # ---------------------------------------------------------------- select photos
     photos = proj["photos"]
@@ -255,6 +301,7 @@ def _run(project_dir, prog):
             os.remove(thumb)
         tasks.append((i, m["path"], out, thumb, reduce, nfeat))
     nfeats = np.zeros(n, np.int64)
+    T.lap("setup")
     prog.set("features", 0, "Detecting features in %d photos" % n, force=True)
     log("Features: %d to compute (%d cached), %d workers" % (len(tasks), n - len(tasks), nworkers))
     from .features import extract
@@ -262,8 +309,9 @@ def _run(project_dir, prog):
     if tasks:
         done = 0
         with _pool(nworkers, _noop_init, None) as pool:
-            for idx, cnt, err in pool.imap_unordered(extract, tasks, chunksize=1):
+            for idx, cnt, err, tt in pool.imap_unordered(extract, tasks, chunksize=1):
                 done += 1
+                T.add("features", tt)
                 if err:
                     log("  feature error on %s: %s" % (meta[idx]["name"], err))
                 prog.set("features", done / len(tasks), "Features %d / %d" % (done, len(tasks)))
@@ -275,6 +323,7 @@ def _run(project_dir, prog):
         except Exception:
             nfeats[i] = 0
     log("Features: median %d per photo" % int(np.median(nfeats)))
+    T.lap("features")
 
     # ---------------------------------------------------------------- pairs
     from scipy.spatial import cKDTree
@@ -341,6 +390,7 @@ def _run(project_dir, prog):
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
 
+    T.lap("pair selection")
     prog.set("matching", 0, "Matching %d image pairs" % len(pairs), force=True)
     match_res = []
     sims = []
@@ -360,6 +410,7 @@ def _run(project_dir, prog):
                 prog.set("matching", done / len(pairs), "Matched %d / %d pairs" % (done, len(pairs)))
     log("Matching: %d of %d pairs verified%s" % (len(match_res), len(pairs),
                                                 ", %d errors" % errors if errors else ""))
+    T.lap("matching")
     if len(match_res) < max(2, n // 4):
         raise RuntimeError("Too few overlapping photo pairs could be matched (%d). Check overlap / photo set."
                            % len(match_res))
@@ -423,7 +474,9 @@ def _run(project_dir, prog):
     def ba_prog(fr, msg):
         prog.set("alignment", 0.1 + 0.75 * fr, msg, force=True)
 
+    T.lap("tracks")
     X, b_tid, b_img, b_uv, err = rec.adjust(s_tid, s_img, s_uv, ntr_s, rounds, progress=ba_prog)
+    T.lap("bundle adjustment")
     obs_per_img = np.bincount(b_img, minlength=n)
     aligned = obs_per_img >= 12
     rms = float(np.sqrt(np.mean(err ** 2))) if len(err) else float("nan")
@@ -453,6 +506,7 @@ def _run(project_dir, prog):
     if len(pts) < 50:
         pts = X
     del uv_all
+    T.lap("surface points")
 
     # ---------------------------------------------------------------- surface
     from .surface import build_dsm
@@ -508,6 +562,7 @@ def _run(project_dir, prog):
     out_h = int(round((oy1 - oy0) / gsd))
     log("Orthomosaic size: %d x %d px (%.1f Mpx)" % (out_w, out_h, out_w * out_h / 1e6))
 
+    T.lap("surface model")
     # exposure balance
     if settings.get("exposure_balance", True):
         prog.set("surface", 0.6, "Balancing exposure", force=True)
@@ -536,11 +591,12 @@ def _run(project_dir, prog):
     with open(os.path.join(work, "recon.pkl"), "wb") as f:
         pickle.dump(recon_out, f)
     prog.set("surface", 1.0, "Surface ready", force=True)
+    T.lap("exposure balance")
 
     # ---------------------------------------------------------------- ortho
     name = safe_name(proj.get("name", "project"))
     ortho_path = os.path.join(out_dir, "%s_orthomosaic.tif" % name)
-    write_orthomosaic(ortho_path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work)
+    write_orthomosaic(ortho_path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T)
 
     seam = None
     try:
@@ -549,12 +605,14 @@ def _run(project_dir, prog):
         seam = seam_check(cams, dsm, gsd, n_pairs=30, log=log)
     except Exception as e:
         log("Seam check skipped: %s" % e)
+    T.lap("seam check")
 
     if settings.get("use_dsm_export", True):
         try:
             write_dsm(os.path.join(out_dir, "%s_surface.tif" % name), dsm, origin, epsg)
         except Exception as e:
             log("DSM export failed: %s" % e)
+    T.lap("surface export")
 
     # ---------------------------------------------------------------- report
     lon_c, lat_c = geo.to_ll(origin[0] + (ox0 + ox1) / 2, origin[1] + (oy0 + oy1) / 2)
@@ -594,6 +652,11 @@ def _run(project_dir, prog):
     except Exception:
         pass
     report["cam_positions"] = [[float(rec.C[i, 0] + origin[0]), float(rec.C[i, 1] + origin[1])] for i in ia]
+    T.lap("report")
+    T.summary(log)
+    report["timing"] = T.as_dict()
+    report["system"] = sysd
+    report["workers"] = nworkers
     save_json(os.path.join(out_dir, "report.json"), report)
     log("Done in %.1f min" % ((time.time() - t_start) / 60))
 
@@ -618,7 +681,7 @@ def ortho_profile(width, height, epsg, transform, settings):
     return prof
 
 
-def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work):
+def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T=None):
     import rasterio
     from rasterio.transform import Affine
     from rasterio.windows import Window
@@ -673,7 +736,11 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             done = 0
             ctxm = mp.get_context("spawn")
             with ctxm.Pool(nworkers, initializer=init_render, initargs=(ctx_file,)) as pool:
-                for res in pool.imap_unordered(render_group, groups):
+                t_write = 0.0
+                for res, tt in pool.imap_unordered(render_group, groups):
+                    if T:
+                        T.add("render", tt)
+                    tw0 = time.time()
                     for (tx, ty, tw, th), rgb, alpha in res:
                         win = Window(tx, ty, tw, th)
                         if jpeg:
@@ -683,6 +750,10 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                             dst.write(np.concatenate([rgb, alpha[..., None]], 2).transpose(2, 0, 1), window=win)
                         done += 1
                         prog.set("ortho", 0.85 * done / len(tiles), "Rendered %d / %d tiles" % (done, len(tiles)))
+                    t_write += time.time() - tw0
+            if T:
+                T.lap("render tiles")
+                T.add("geotiff", {"write": t_write})
             prog.set("ortho", 0.87, "Building overviews", force=True)
             facs = []
             f = 2
@@ -692,6 +763,8 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             if facs:
                 dst.build_overviews(facs, Resampling.average)
                 dst.update_tags(ns="rio_overview", resampling="average")
+    if T:
+        T.lap("overviews")
     if os.path.exists(path):
         os.remove(path)
     os.replace(tmp, path)
@@ -709,6 +782,8 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
         log("preview failed: %s" % e)
     prog.set("ortho", 1.0, "Orthomosaic written", force=True)
     log("Orthomosaic: %s" % path)
+    if T:
+        T.lap("preview")
 
 
 def write_dsm(path, dsm, origin, epsg):

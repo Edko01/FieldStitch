@@ -2,6 +2,7 @@
 import math
 import os
 import pickle
+import time
 from collections import OrderedDict
 
 import cv2
@@ -153,6 +154,7 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
 _RCTX = None
 _IMG_CACHE = OrderedDict()
 _IMG_BYTES = [0]
+_T = {"read": 0.0, "decode": 0.0, "warp": 0.0, "total": 0.0, "bytes": 0, "loads": 0}
 
 
 def init_render(ctx_file):
@@ -170,7 +172,16 @@ def _get_image(ci):
         _IMG_CACHE.move_to_end(ci)
         return _IMG_CACHE[ci]
     cam = _RCTX["cams"][ci]
-    img = load_image(cam["path"], _RCTX["reduce"], color=True)
+    import time
+    from .features import read_file, decode
+    t0 = time.perf_counter()
+    buf = read_file(cam["path"])
+    t1 = time.perf_counter()
+    img = decode(buf, _RCTX["reduce"], color=True)
+    _T["read"] += t1 - t0
+    _T["decode"] += time.perf_counter() - t1
+    _T["bytes"] += int(buf.nbytes)
+    _T["loads"] += 1
     _IMG_CACHE[ci] = img
     _IMG_BYTES[0] += img.nbytes
     while _IMG_BYTES[0] > _RCTX["cache_bytes"] and len(_IMG_CACHE) > 2:
@@ -268,7 +279,9 @@ def render_tile(tile):
         if r != 1:
             u_f = (u_f + 0.5) / r - 0.5
             v_f = (v_f + 0.5) / r - 0.5
+        tw0 = time.perf_counter()
         samp = cv2.remap(img, u_f, v_f, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        _T["warp"] += time.perf_counter() - tw0
         g = c["cams"][ci]["gain"]
         samp = samp.astype(np.float32) * np.array(g[::-1], np.float32)  # BGR order
         acc[r0:r1, c0:c1] += samp * w_f[..., None]
@@ -287,4 +300,10 @@ def render_tile(tile):
 
 
 def render_group(group):
-    return [render_tile(t) for t in group]
+    t0 = time.perf_counter()
+    res = [render_tile(t) for t in group]
+    _T["total"] += time.perf_counter() - t0
+    snap = dict(_T)
+    for k in _T:
+        _T[k] = 0 if k in ("bytes", "loads") else 0.0
+    return res, snap

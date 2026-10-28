@@ -59,16 +59,24 @@ def _spread(kps, W, H, n, gx=12, gy=9):
 def extract(task):
     """task: (index, path, out_npz, thumb_path, reduce, nfeat).
 
-    Returns (index, n_features, error)
+    Returns (index, n_features, error, timings)
     """
     idx, path, out_npz, thumb_path, reduce, nfeat = task
+    import time
+    tt = {"read": 0.0, "decode": 0.0, "detect": 0.0, "describe": 0.0, "bytes": 0}
     try:
+        t0 = time.perf_counter()
         buf = read_file(path)
+        tt["bytes"] = int(buf.nbytes)
+        t1 = time.perf_counter()
+        tt["read"] = t1 - t0
         gray = decode(buf, reduce, color=False)
         h, w = gray.shape[:2]
         if thumb_path and not os.path.exists(thumb_path):
             th = decode(buf, 8, color=True)
             write_jpg(thumb_path, th, 88)
+        t2 = time.perf_counter()
+        tt["decode"] = t2 - t1
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         g2 = clahe.apply(gray)
         sift = cv2.SIFT_create(nfeatures=int(nfeat * 2.2), contrastThreshold=0.015, edgeThreshold=12)
@@ -76,15 +84,18 @@ def extract(task):
         if len(kps) < 10:
             np.savez(out_npz, xy=np.zeros((0, 2), np.float32), desc=np.zeros((0, 128), np.uint8),
                      resp=np.zeros(0, np.float32), red_wh=np.array([w, h], np.int32))
-            return idx, 0, None
+            return idx, 0, None, tt
+        t3 = time.perf_counter()
+        tt["detect"] = t3 - t2
         sel = _spread(kps, w, h, nfeat)
         kps = [kps[i] for i in sel]
         kps = sorted(kps, key=lambda k: -k.response)
         kps, desc = sift.compute(g2, kps)
+        tt["describe"] = time.perf_counter() - t3
         if desc is None or len(kps) < 10:
             np.savez(out_npz, xy=np.zeros((0, 2), np.float32), desc=np.zeros((0, 128), np.uint8),
                      resp=np.zeros(0, np.float32), red_wh=np.array([w, h], np.int32))
-            return idx, 0, None
+            return idx, 0, None, tt
         # RootSIFT
         desc = desc / (np.abs(desc).sum(1, keepdims=True) + 1e-7)
         desc = np.sqrt(desc)
@@ -93,6 +104,6 @@ def extract(task):
         # coordinates stay in reduced-image pixels; red_wh lets loaders map to full res
         resp = np.array([k.response for k in kps], np.float32)
         np.savez(out_npz, xy=xy, desc=desc, resp=resp, red_wh=np.array([w, h], np.int32))
-        return idx, len(kps), None
+        return idx, len(kps), None, tt
     except Exception as e:  # noqa
-        return idx, 0, "%s: %s" % (type(e).__name__, e)
+        return idx, 0, "%s: %s" % (type(e).__name__, e), tt

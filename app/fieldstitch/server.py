@@ -347,6 +347,27 @@ def check_ortho_crs():
         S.compute_origin()
 
 
+def save_diagnostics():
+    """Zip the log, report (minus coordinates) and settings for troubleshooting / performance tuning."""
+    import zipfile
+    from .sysinfo import describe
+    stamp = time.strftime("%Y%m%d-%H%M")
+    path = os.path.join(S.dir, "FieldStitch-diagnostics-%s-%s.zip" % (safe_name(S.proj["name"]), stamp))
+    rep = S.report() or {}
+    rep = {k: v for k, v in rep.items() if k not in ("cam_positions", "center_lonlat")}
+    summary = P.summarize(S.proj)
+    info = {"version": __version__, "settings": S.proj.get("settings"), "photos": summary,
+            "progress": progress_state(), "system": describe(S.dir, S.proj.get("folders") or [])}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in ("log.txt", "process_console.txt"):
+            fp = os.path.join(S.dir, name)
+            if os.path.exists(fp):
+                z.write(fp, name)
+        z.writestr("report.json", json.dumps(rep, indent=1))
+        z.writestr("info.json", json.dumps(info, indent=1, default=str))
+    return path
+
+
 def export_worker(ids, out_dir, compression):
     from .export import export_area, safe_filename
     try:
@@ -640,6 +661,13 @@ class Handler(BaseHTTPRequestHandler):
                 S.proj["selection"] = sorted(set(int(i) for i in ids)) or None
             S.save()
             return {}
+        if path == "/api/diagnostics":
+            p = save_diagnostics()
+            if IS_WIN:
+                subprocess.Popen(["explorer", "/select,", p])
+            else:
+                open_in_explorer(os.path.dirname(p))
+            return {"path": p}
         if path == "/api/settings":
             S.proj["settings"].update(b)
             S.save()
