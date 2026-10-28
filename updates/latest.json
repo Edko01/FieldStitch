@@ -1,8 +1,8 @@
 {
- "version": "1.2.3",
+ "version": "1.2.4",
  "runtime": 1,
- "app_zip": "updates/fieldstitch-app-1.2.3.zip",
- "sha256": "8c1432efd35229ce451f6e89fc397a8015f399e54a3fed2946cae0da4b0382a9",
- "notes": "- Fixes 1.2.2 failing with \"Too few overlapping photo pairs\" on Matrice 4E jobs: the heading check now reads the camera's full orientation (heading and roll), so M4E photos are no longer wrongly 'corrected'\n- Safety net: if matching with the drone's orientation data goes badly, FieldStitch automatically matches again without it instead of stopping\n- Save diagnostics now shows the full file path",
- "date": "2026-10-27"
+ "app_zip": "updates/fieldstitch-app-1.2.4.zip",
+ "sha256": "e2daf34f0097e43b8b1c285f604a8882c7b6e55be01c6ca7d2458ade1121842b",
+ "notes": "- Re-running a project no longer re-opens every saved feature file before matching (could take minutes on big jobs after a restart); progress is shown if it has to\n- The processing timer keeps counting during steps that don't report progress\n- Includes 1.2.3 fixes",
+ "date": "2026-10-28"
 }

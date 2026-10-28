@@ -283,7 +283,8 @@ function renderProcess(p) {
     });
     $("runBar").style.width = Math.round((pr.overall || 0) * 100) + "%";
     $("runMsg").textContent = pr.message || "";
-    $("runTime").textContent = running ? fmtTime(pr.elapsed) + (pr.eta ? ", about " + fmtTime(pr.eta) + " left" : "") : "";
+    const elapsed = pr.started ? Math.max(pr.elapsed || 0, Date.now() / 1000 - pr.started) : pr.elapsed;
+    $("runTime").textContent = running ? fmtTime(elapsed) + (pr.eta ? ", about " + fmtTime(pr.eta) + " left" : "") : "";
     if (pr.status === "error") setErr("procErr", "Processing stopped: " + (pr.message || "unknown error") + "\nOpen the log for details.");
     else if (pr.status === "cancelled" && !running) setErr("procErr", "Processing was cancelled.");
     else setErr("procErr", "");

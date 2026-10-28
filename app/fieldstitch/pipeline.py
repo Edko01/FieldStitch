@@ -309,7 +309,7 @@ def _run(project_dir, prog):
     tasks = []
     for i, m in enumerate(meta):
         out = os.path.join(feat_dir, "%d.npz" % i)
-        if old.get(str(i)) == [m["path"], feat_key] and os.path.exists(out):
+        if list(old.get(str(i), []))[:2] == [m["path"], feat_key] and os.path.exists(out):
             continue
         thumb = os.path.join(thumb_dir, "%d.jpg" % i)
         if os.path.exists(thumb) and old.get(str(i), [None])[0] != m["path"]:
@@ -320,23 +320,30 @@ def _run(project_dir, prog):
     prog.set("features", 0, "Detecting features in %d photos" % n, force=True)
     log("Features: %d to compute (%d cached), %d workers" % (len(tasks), n - len(tasks), nworkers))
     from .features import extract
-    newkey = {str(i): [m["path"], feat_key] for i, m in enumerate(meta)}
+    newkey = {str(i): [m["path"], feat_key] + list(old.get(str(i), []))[2:3] for i, m in enumerate(meta)}
     if tasks:
         done = 0
         with _pool(nworkers, _noop_init, None) as pool:
             for idx, cnt, err, tt in pool.imap_unordered(extract, tasks, chunksize=1):
                 done += 1
                 T.add("features", tt)
+                newkey[str(idx)] = [meta[idx]["path"], feat_key, int(cnt)]
                 if err:
                     log("  feature error on %s: %s" % (meta[idx]["name"], err))
                 prog.set("features", done / len(tasks), "Features %d / %d" % (done, len(tasks)))
-    save_json(key_path, newkey)
-    for i in range(n):
+    # feature counts: from the cache index when known, otherwise read once and remember
+    missing = [i for i in range(n) if len(newkey[str(i)]) < 3]
+    for k, i in enumerate(missing):
         try:
-            d = np.load(os.path.join(feat_dir, "%d.npz" % i))
-            nfeats[i] = len(d["xy"])
+            with np.load(os.path.join(feat_dir, "%d.npz" % i)) as d:
+                newkey[str(i)] = [meta[i]["path"], feat_key, int(len(d["xy"]))]
         except Exception:
-            nfeats[i] = 0
+            newkey[str(i)] = [meta[i]["path"], feat_key, 0]
+        if k % 50 == 0:
+            prog.set("features", k / max(1, len(missing)), "Checking saved features %d / %d" % (k, len(missing)))
+    for i in range(n):
+        nfeats[i] = newkey[str(i)][2]
+    save_json(key_path, newkey)
     log("Features: median %d per photo" % int(np.median(nfeats)))
     T.lap("features")
 
