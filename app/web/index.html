@@ -24,14 +24,19 @@
   <symbol id="i-tif" viewBox="0 0 24 24"><path d="M3 5l6-2 6 2 6-2v16l-6 2-6-2-6 2zM9 3v16M15 5v16"/></symbol>
   <symbol id="i-more" viewBox="0 0 20 20"><circle cx="4" cy="10" r="1.4"/><circle cx="10" cy="10" r="1.4"/><circle cx="16" cy="10" r="1.4"/></symbol>
   <symbol id="i-close" viewBox="0 0 20 20"><path d="M5 5l10 10M15 5 5 15"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 20 20"><path d="M13.5 3.5l3 3L7 16H4v-3z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></symbol>
   <symbol id="i-fit" viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></symbol>
 </svg>
 
 <header class="topbar">
-  <button class="iconbtn projbtn" id="btnProjects" title="All projects" aria-label="All projects"><svg><use href="#i-grid"/></svg></button>
   <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="#2D3D35"/><path d="M9 7v18M16 25V7M23 7v18M9 7h7M16 25h7" fill="none" stroke="#E9B20F" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>FieldStitch</div>
+  <button class="topbtn" id="btnProjects" title="Your projects, and starting a new one"><svg><use href="#i-grid"/></svg>Projects</button>
   <span class="topsep" aria-hidden="true"></span>
-  <input class="projname" id="projName" value="Unnamed project" aria-label="Project name" spellcheck="false" autocomplete="off">
+  <div class="namewrap" id="nameWrap" hidden>
+    <input class="projname" id="projName" value="" aria-label="Project name" spellcheck="false" autocomplete="off" title="Rename the project">
+    <button class="iconbtn sm pencil" id="btnRename" title="Rename the project" aria-label="Rename the project"><svg><use href="#i-pencil"/></svg></button>
+  </div>
   <div class="topright">
     <button class="ghost" id="btnUpdate" title="Check GitHub for a newer version">Check for updates<i class="dot" id="updDot" hidden></i></button>
     <div class="menuwrap">
@@ -49,7 +54,7 @@
 
 <main class="shell">
   <nav class="rail" aria-label="Workflow">
-    <button class="railbtn" data-panel="import" id="railImport"><svg><use href="#i-import"/></svg><span>Import</span></button>
+    <button class="railbtn" data-panel="import" id="railImport"><svg><use href="#i-images"/></svg><span>Photos</span></button>
     <button class="railbtn" data-panel="process" id="railProcess"><svg><use href="#i-process"/></svg><span>Process</span></button>
     <button class="railbtn" data-panel="layers" id="railLayers"><svg><use href="#i-layers"/></svg><span>Layers</span></button>
     <button class="railbtn" data-panel="areas" id="railAreas"><svg><use href="#i-areas"/></svg><span>Areas</span></button>
@@ -59,19 +64,16 @@
   <!-- ===== side panels ===== -->
   <aside class="side" id="side" hidden>
     <section class="pane" id="paneImport" data-pane="import">
-      <header class="panehead"><h2>Import</h2><button class="iconbtn sm" data-closepane aria-label="Close panel"><svg><use href="#i-close"/></svg></button></header>
-      <div class="sources">
-        <button class="source" id="srcImages"><svg><use href="#i-images"/></svg><b>Images</b><small>Pick photos</small></button>
-        <button class="source" id="srcFolder"><svg><use href="#i-folder"/></svg><b>Folder</b><small>All photos in it</small></button>
-        <button class="source" id="srcTif"><svg><use href="#i-tif"/></svg><b>GeoTIFF</b><small>Existing map</small></button>
-      </div>
-      <label class="check"><input type="checkbox" id="optRecursive" checked> Include subfolders</label>
-      <div class="pasterow"><input id="pastePath" placeholder="…or paste a folder path and press Enter" aria-label="Folder path"></div>
+      <header class="panehead"><h2>Photos</h2><button class="iconbtn sm" data-closepane aria-label="Close panel"><svg><use href="#i-close"/></svg></button></header>
+      <div class="scanbox" id="scanBox" hidden><div class="bar"><i id="scanBar"></i></div><span id="scanText"></span></div>
       <p class="form-error" id="importErr" role="alert"></p>
-
       <div id="importDetails" hidden>
-        <h3>In this project</h3>
         <ul class="folders" id="folderList"></ul>
+        <div class="addrow" id="addRow">
+          <span>Add more photos to this project:</span>
+          <button class="ghost small" id="addFolder"><svg><use href="#i-folder"/></svg>Folder…</button>
+          <button class="ghost small" id="addImages"><svg><use href="#i-images"/></svg>Photos…</button>
+        </div>
         <dl class="facts" id="photoFacts"></dl>
         <div class="issues" id="issues" hidden></div>
         <div class="selection" id="selectionBox" hidden>
@@ -81,7 +83,8 @@
             <button class="ghost small" id="btnSelectAll">Use all photos</button>
           </div>
         </div>
-        <button class="primary wide" id="btnToProcess">Next: processing options</button>
+        <button class="primary wide" id="btnToProcess">Processing options…</button>
+        <p class="hint small newhint">A different flight or field? Start a <button class="linkish" id="newFromPanel">new project</button> so the photos aren't mixed.</p>
       </div>
     </section>
 
@@ -159,16 +162,6 @@
   <!-- ===== map ===== -->
   <section class="mapwrap" id="mapwrap">
     <div id="map"></div>
-    <div class="emptycard" id="emptyCard" hidden>
-      <h1>Start with your drone photos</h1>
-      <p>Pick a folder from the flight and FieldStitch names the project after it. Everything runs on this computer.</p>
-      <div class="sources big">
-        <button class="source" id="emImages"><svg><use href="#i-images"/></svg><b>Images</b></button>
-        <button class="source" id="emFolder"><svg><use href="#i-folder"/></svg><b>Folder</b></button>
-        <button class="source" id="emTif"><svg><use href="#i-tif"/></svg><b>GeoTIFF</b></button>
-      </div>
-      <button class="linkish" id="emRecent">Open a recent project</button>
-    </div>
     <div class="maptools">
       <button class="mapbtn" id="btnFit" title="Zoom to job"><svg><use href="#i-fit"/></svg>Zoom to job</button>
     </div>
@@ -178,20 +171,22 @@
     </div>
   </section>
 
-  <!-- ===== projects dashboard ===== -->
+  <!-- ===== start screen / projects ===== -->
   <section class="dash" id="dash" hidden aria-label="Projects">
     <div class="dash-inner">
       <header class="dashhead">
         <h1>Projects</h1>
-        <div class="btnrow">
-          <button class="primary" id="dNew">New project</button>
-          <button class="ghost" id="dOpen">Open project folder…</button>
-          <button class="iconbtn" id="dClose" aria-label="Close projects"><svg><use href="#i-close"/></svg></button>
-        </div>
+        <button class="iconbtn" id="dClose" title="Back to the open project" aria-label="Back to the open project"><svg><use href="#i-close"/></svg></button>
       </header>
-      <p class="dashloc">New projects are saved in <b id="dLoc"></b> <button class="linkish" id="dLocChange">Change</button></p>
+      <div class="starts">
+        <button class="startbtn primary-start" id="dNew"><svg><use href="#i-plus"/></svg><span><b>New project</b><small>From a flight's folder of photos</small></span></button>
+        <button class="startbtn" id="dOpen"><svg><use href="#i-folder"/></svg><span><b>Open project folder…</b><small>A FieldStitch project not listed below</small></span></button>
+        <button class="startbtn" id="dTif"><svg><use href="#i-tif"/></svg><span><b>Open a GeoTIFF…</b><small>Split or export an existing orthomosaic</small></span></button>
+      </div>
       <p class="form-error" id="dErr" role="alert"></p>
+      <h2 class="recenthead">Recent projects</h2>
       <ul class="cards" id="dCards"></ul>
+      <p class="dashloc">New projects are saved in <b id="dLoc"></b> <button class="linkish" id="dLocChange">Change</button></p>
     </div>
   </section>
 </main>
@@ -209,10 +204,35 @@
   </span>
 </footer>
 
+<!-- ===== new project ===== -->
+<dialog class="modal" id="newDlg" aria-labelledby="newTitle">
+  <form method="dialog" id="newForm">
+    <header class="modalhead"><h2 id="newTitle">New project</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <p class="step"><span class="num">1</span>Choose the photos</p>
+    <div class="pickrow">
+      <button type="button" class="source" id="npFolder"><svg><use href="#i-folder"/></svg><b>Folder</b><small>Every photo in it, including subfolders</small></button>
+      <button type="button" class="source" id="npImages"><svg><use href="#i-images"/></svg><b>Photos</b><small>Pick individual photos</small></button>
+    </div>
+    <p class="picked" id="npPicked" hidden></p>
+    <p class="step"><span class="num">2</span>Name and location</p>
+    <label>Project name<input id="npName" autocomplete="off" spellcheck="false" placeholder="Named after the folder you choose"></label>
+    <label>Save in
+      <span class="pathrow"><input id="npParent" spellcheck="false"><button type="button" class="ghost" id="npBrowse">Change…</button></span>
+    </label>
+    <p class="hint small" id="npWhere"></p>
+    <p class="form-error" id="npErr" role="alert"></p>
+    <div class="btnrow end">
+      <button class="ghost" value="cancel">Cancel</button>
+      <button class="primary" id="npCreate" value="create" disabled>Create project</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- ===== processing options ===== -->
 <dialog class="modal wide" id="procDlg" aria-labelledby="procTitle">
   <form method="dialog" id="procForm">
     <header class="modalhead"><h2 id="procTitle">Processing options</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <div class="issues" id="optIssues" hidden></div>
     <fieldset class="cards3" id="presetCards">
       <legend>Processing type</legend>
       <label><input type="radio" name="preset" value="fast"><span><b>Fast</b><small>Ideal for scouting, same-day checks and very large jobs.</small></span></label>

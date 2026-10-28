@@ -26,6 +26,7 @@ let exportWasRunning = false;
 let lastScan = null;
 let panel = "import";
 let nativeGsdCm = null;
+let optionsAfterScan = false;   // open Processing options when the current photo import finishes
 
 // ------------------------------------------------------------------ utils
 async function api(path, body) {
@@ -103,24 +104,26 @@ function render() {
   const p = status.project;
   const dir = p ? p.dir : null;
   if (dir !== lastProjectDir) {
-    const first = lastProjectDir === undefined;
     lastProjectDir = dir;
     photos = null; result = null; areas = []; lastResultMtime = null; lastProgressStatus = null;
     clearLayers();
     if (p) {
+      $("dash").hidden = true;
       loadPhotos(true);
       loadResult(true);
       $("exportDir").value = p.dir + sep() + "exports";
-      if (first) setPanel(p.has_result ? "layers" : (p.count ? "process" : "import"));
+      setPanel(p.has_result ? "layers" : (status.running ? "process" : "import"));
     } else {
-      setPanel("import");
+      setPanel(null);
       map.setView([0, 0], 2);
+      openDash();
     }
   }
+  if (!p && $("dash").hidden) openDash();
+  $("btnProjects").setAttribute("aria-pressed", !$("dash").hidden);
+  $("nameWrap").hidden = !p;
   const name = $("projName");
-  if (document.activeElement !== name) name.value = p ? p.name : "Unnamed project";
-  name.disabled = !p;
-  name.title = p ? "Click to rename the project" : "Import photos to start a project";
+  if (document.activeElement !== name) name.value = p ? p.name : "";
   $("mOpenFolder").disabled = !p;
   $("mClose").disabled = !p;
   $("mDiag").disabled = !p;
@@ -130,7 +133,6 @@ function render() {
   $("railProcess").disabled = !p || !p.count || !!geotiff;
   $("railAreas").disabled = !p;
   $("railExport").disabled = !(p && p.has_result);
-  $("emptyCard").hidden = !!(p && (p.count || p.has_result)) || busyScan();
 
   renderImport(p);
   renderProcess(p);
@@ -151,20 +153,29 @@ function setPanel(name) {
 function renderImport(p) {
   const sc = status.scan;
   const scanning = busyScan();
-  ["srcImages", "srcFolder", "srcTif", "emImages", "emFolder", "emTif"].forEach((id) => ($(id).disabled = scanning || status.running));
+  ["addFolder", "addImages"].forEach((id) => ($(id).disabled = scanning || status.running));
+  $("scanBox").hidden = !scanning;
+  if (scanning) {
+    $("scanBar").style.width = (sc.total ? (100 * sc.done) / sc.total : 2) + "%";
+    $("scanText").textContent = sc.total ? "Reading photo " + fmt(sc.done) + " of " + fmt(sc.total) + "…" : "Looking for photos…";
+  }
   if (scanWasRunning && !scanning && sc) {
     lastScan = sc;
-    if (sc.error) setErr("importErr", sc.error);
-    else {
-      toast(sc.added ? "Imported " + fmt(sc.added) + " photos." : "No new photos found there.");
-      $("pastePath").value = "";
-    }
     loadPhotos(true);
+    if (sc.error) { setErr("importErr", sc.error); optionsAfterScan = false; }
+    else if (!sc.added) { setErr("importErr", "No drone photos were found there. Choose the folder that holds the flight's JPG photos."); optionsAfterScan = false; }
+    else {
+      setErr("importErr", "");
+      toast("Loaded " + fmt(sc.added) + " photos.");
+      if (optionsAfterScan && p && p.count) setTimeout(openOptions, 300);
+      optionsAfterScan = false;
+    }
   }
   scanWasRunning = scanning;
 
-  $("importDetails").hidden = !p || (!p.count && !p.geotiff);
+  $("importDetails").hidden = !p || (!p.count && !p.geotiff) || scanning;
   if (!p) return;
+  $("addRow").hidden = !!p.geotiff;
   const ul = $("folderList");
   ul.innerHTML = "";
   if (p.geotiff) {
@@ -215,17 +226,7 @@ function renderImport(p) {
   }
   facts($("photoFacts"), rows);
 
-  const issues = [];
-  const noGps = p.count - p.with_gps;
-  if (noGps) issues.push(fmt(noGps) + (noGps === 1 ? " photo has" : " photos have") + " no GPS position and will be skipped.");
-  if (p.oblique) issues.push(fmt(p.oblique) + (p.oblique === 1 ? " photo is" : " photos are") + " tilted away from straight down and will be skipped.");
-  if (p.other_camera) issues.push(fmt(p.other_camera) + (p.other_camera === 1 ? " photo comes" : " photos come") + " from another camera and will be skipped.");
-  if (lastScan && lastScan.skipped_small) issues.push(fmt(lastScan.skipped_small) + " small images (thumbnails or previews) were not imported.");
-  if (lastScan && lastScan.errors) issues.push(fmt(lastScan.errors) + " files couldn't be read, e.g. " + (lastScan.error_examples || []).join("; "));
-  const box = $("issues");
-  box.hidden = !issues.length;
-  box.innerHTML = "<b>Import details</b><ul></ul>";
-  for (const t of issues) { const li = document.createElement("li"); li.textContent = t; box.querySelector("ul").append(li); }
+  showIssues($("issues"), p);
 
   $("selectionBox").hidden = !p.count;
   const n = p.selected;
@@ -233,36 +234,122 @@ function renderImport(p) {
   $("btnSelectAll").hidden = n === p.count;
   $("btnToProcess").hidden = !p.count;
   $("btnToProcess").disabled = status.running || scanning;
-  $("btnToProcess").textContent = p.has_result ? "Process again…" : "Next: processing options";
+  $("btnToProcess").textContent = p.has_result ? "Process again…" : "Processing options…";
 }
 
-async function importSource(kind, path) {
+function photoIssues(p) {
+  const issues = [];
+  const noGps = p.count - p.with_gps;
+  if (noGps) issues.push(fmt(noGps) + (noGps === 1 ? " photo has" : " photos have") + " no GPS position and will be skipped.");
+  if (p.oblique) issues.push(fmt(p.oblique) + (p.oblique === 1 ? " photo is" : " photos are") + " tilted away from straight down and will be skipped.");
+  if (p.other_camera) issues.push(fmt(p.other_camera) + (p.other_camera === 1 ? " photo comes" : " photos come") + " from another camera and will be skipped.");
+  if (lastScan && lastScan.skipped_small) issues.push(fmt(lastScan.skipped_small) + " small images (thumbnails or previews) were not loaded.");
+  if (lastScan && lastScan.errors) issues.push(fmt(lastScan.errors) + " files couldn't be read, e.g. " + (lastScan.error_examples || []).join("; "));
+  return issues;
+}
+function showIssues(box, p) {
+  const issues = photoIssues(p);
+  box.hidden = !issues.length;
+  box.innerHTML = "<b>Photo check</b><ul></ul>";
+  for (const t of issues) { const li = document.createElement("li"); li.textContent = t; box.querySelector("ul").append(li); }
+}
+
+async function addPhotos(kind) {
   setErr("importErr", "");
   let arg;
   if (kind === "images") {
-    const files = path || await browse("images", "Choose drone photos", "");
+    const files = await browse("images", "Choose drone photos to add", "");
     if (!files || !files.length) return;
     arg = { files, recursive: false };
-  } else if (kind === "folder") {
-    const folder = path || await browse("folder", "Choose a folder of drone photos", "");
-    if (!folder) return;
-    arg = { folder, recursive: $("optRecursive").checked };
   } else {
-    const f = path || await browse("geotiff", "Choose an orthomosaic GeoTIFF", "");
-    if (!f) return;
-    try { await api("/api/geotiff/open", { path: f }); lastScan = null; await refresh(); setPanel("layers"); toast("Opened " + f.split(/[\\/]/).pop()); }
-    catch (e) { setErr("importErr", e.message); setPanel("import"); }
-    return;
+    const folder = await browse("folder", "Choose a folder of drone photos to add", "");
+    if (!folder) return;
+    arg = { folder, recursive: true };
   }
-  const p = status.project;
   try {
-    if (p && !p.geotiff) await api("/api/photos/add", arg);
-    else await api("/api/project/start", arg);
+    await api("/api/photos/add", arg);
     scanWasRunning = true;
     lastScan = null;
+    optionsAfterScan = true;
     setPanel("import");
     refresh();
   } catch (e) { setErr("importErr", e.message); setPanel("import"); }
+}
+
+async function openGeotiff() {
+  setErr("dErr", "");
+  const f = await browse("geotiff", "Choose an orthomosaic GeoTIFF", "");
+  if (!f) return;
+  try {
+    await api("/api/geotiff/open", { path: f });
+    lastScan = null;
+    $("dash").hidden = true;
+    await refresh();
+    toast("Opened " + f.split(/[\\/]/).pop());
+  } catch (e) { setErr("dErr", e.message); }
+}
+
+// ------------------------------------------------------------------ new project window
+let np = { folder: null, files: null, nameEdited: false };
+let npTimer = null;
+async function openNew() {
+  np = { folder: null, files: null, nameEdited: false };
+  $("npName").value = "";
+  setErr("npErr", "");
+  $("npPicked").hidden = true;
+  $("npWhere").textContent = "";
+  $("npCreate").disabled = true;
+  ["npFolder", "npImages"].forEach((id) => $(id).setAttribute("aria-pressed", false));
+  try { $("npParent").value = (await api("/api/projects")).dir; } catch (e) { $("npParent").value = status.default_dir || ""; }
+  $("newDlg").showModal();
+}
+async function npSuggest() {
+  if (!np.folder && !np.files) return;
+  try {
+    const r = await api("/api/project/suggest", { folder: np.folder, files: np.files, parent: $("npParent").value.trim(),
+                                                  name: np.nameEdited ? $("npName").value : "" });
+    if (!np.nameEdited) $("npName").value = r.name;
+    $("npWhere").textContent = "The project will be saved as " + r.dir;
+    $("npCreate").disabled = !$("npName").value.trim();
+  } catch (e) { setErr("npErr", e.message); }
+}
+async function npPick(kind) {
+  setErr("npErr", "");
+  if (kind === "folder") {
+    const f = await browse("folder", "Choose the folder with the flight's photos", "");
+    if (!f) return;
+    np.folder = f; np.files = null;
+    $("npPicked").innerHTML = "Folder: <b></b>";
+    $("npPicked").querySelector("b").textContent = f;
+  } else {
+    const files = await browse("images", "Choose drone photos", "");
+    if (!files || !files.length) return;
+    np.files = files; np.folder = null;
+    const dir = files[0].replace(/[\\/][^\\/]*$/, "");
+    $("npPicked").innerHTML = "<b></b> from ";
+    $("npPicked").querySelector("b").textContent = fmt(files.length) + (files.length === 1 ? " photo" : " photos");
+    $("npPicked").append(dir);
+  }
+  $("npPicked").hidden = false;
+  $("npFolder").setAttribute("aria-pressed", kind === "folder");
+  $("npImages").setAttribute("aria-pressed", kind !== "folder");
+  npSuggest();
+}
+async function npCreate() {
+  setErr("npErr", "");
+  const name = $("npName").value.trim();
+  if (!name) return setErr("npErr", "Enter a project name.");
+  $("npCreate").disabled = true;
+  try {
+    await api("/api/project/start", { folder: np.folder, files: np.files, recursive: true, name, parent: $("npParent").value.trim() });
+    $("newDlg").close();
+    scanWasRunning = true;
+    lastScan = null;
+    optionsAfterScan = true;
+    $("dash").hidden = true;
+    await refresh();
+    setPanel("import");
+  } catch (e) { setErr("npErr", e.message); $("npCreate").disabled = false; }
 }
 
 async function loadPhotos(fit) {
@@ -352,7 +439,7 @@ function renderStatusBar(p) {
   } else if (pr && pr.status === "error") {
     st.textContent = "Processing stopped: " + (pr.message || "error");
   } else if (!p) {
-    st.textContent = "Ready · import photos to start";
+    st.textContent = "Ready";
   } else if (p.has_result) {
     st.textContent = "Orthomosaic ready";
   } else if (p.count) {
@@ -394,6 +481,8 @@ function openOptions() {
   if (s.resolution_cm && nativeGsdCm) f = s.resolution_cm / nativeGsdCm;
   setSliderFactor(f);
   $("btnStart").textContent = p.has_result ? "Process again" : "Start processing";
+  showIssues($("optIssues"), p);
+  if ($("procDlg").open) return;
   $("procDlg").showModal();
   updateResLabel();
   requestEstimate();
@@ -803,10 +892,11 @@ function renderExportProgress() {
 
 // ------------------------------------------------------------------ projects dashboard
 async function openDash() {
+  const wasHidden = $("dash").hidden;
   $("dash").hidden = false;
-  setErr("dErr", "");
-  $("dClose").hidden = !status.project;
-  await renderDash(true);
+  $("dClose").hidden = !(status && status.project);
+  $("btnProjects").setAttribute("aria-pressed", true);
+  if (wasHidden) { setErr("dErr", ""); await renderDash(true); }
 }
 let dashLoaded = 0;
 async function renderDash(force) {
@@ -820,7 +910,7 @@ async function renderDash(force) {
   if (!d.projects.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = "No projects yet. Choose New project and import a folder of photos.";
+    li.textContent = "No projects yet. Click New project and choose the folder with a flight's photos.";
     ul.append(li);
   }
   const cur = status.project && status.project.dir;
@@ -879,7 +969,7 @@ function showLog() { $("logDrawer").hidden = false; loadLog(); }
 // ------------------------------------------------------------------ wiring
 async function browse(mode, title, initial) {
   try { return (await api("/api/browse", { mode, title, initial: initial || "" })).path; }
-  catch (e) { toast("Could not open the file browser. Paste the folder path instead."); return ""; }
+  catch (e) { toast("Could not open the file browser: " + e.message); return ""; }
 }
 function closeMenu() { $("moreMenu").hidden = true; $("btnMore").setAttribute("aria-expanded", false); }
 
@@ -889,14 +979,18 @@ function wire() {
   $("railExport").onclick = () => openExport(false);
 
   // top bar
-  $("btnProjects").onclick = () => ($("dash").hidden ? openDash() : (status.project && ($("dash").hidden = true)));
+  $("btnProjects").onclick = () => {
+    if ($("dash").hidden) openDash();
+    else if (status.project) { $("dash").hidden = true; $("btnProjects").setAttribute("aria-pressed", false); }
+  };
+  $("btnRename").onclick = () => { $("projName").focus(); };
   const nm = $("projName");
   nm.onkeydown = (e) => { if (e.key === "Enter") nm.blur(); if (e.key === "Escape") { nm.value = status.project ? status.project.name : ""; nm.blur(); } };
   nm.onfocus = () => nm.select();
   nm.onblur = async () => {
     const p = status.project;
     const v = nm.value.trim();
-    if (!p || !v || v === p.name) { nm.value = p ? p.name : "Unnamed project"; return; }
+    if (!p || !v || v === p.name) { nm.value = p ? p.name : ""; return; }
     try {
       const r = await api("/api/rename", { name: v });
       lastProjectDir = r.dir;
@@ -918,19 +1012,10 @@ function wire() {
   $("btnDiag2").onclick = diag;
   $("mClose").onclick = () => { closeMenu(); closeProject(); };
 
-  // import
-  $("srcImages").onclick = $("emImages").onclick = () => importSource("images");
-  $("srcFolder").onclick = $("emFolder").onclick = () => importSource("folder");
-  $("srcTif").onclick = $("emTif").onclick = () => importSource("geotiff");
-  $("pastePath").onkeydown = (e) => {
-    if (e.key !== "Enter") return;
-    const v = $("pastePath").value.trim().replace(/^"|"$/g, "");
-    if (!v) return;
-    if (/\.tiff?$/i.test(v)) importSource("geotiff", v);
-    else if (/\.jpe?g$/i.test(v)) importSource("images", [v]);
-    else importSource("folder", v);
-  };
-  $("emRecent").onclick = openDash;
+  // photos
+  $("addFolder").onclick = () => addPhotos("folder");
+  $("addImages").onclick = () => addPhotos("images");
+  $("newFromPanel").onclick = openNew;
   $("btnSelectArea").onclick = () => setTool("select");
   $("btnSelectAll").onclick = async () => { await api("/api/photos/select", { clear: true }); await loadPhotos(false); refresh(); };
   $("btnToProcess").onclick = openOptions;
@@ -1013,12 +1098,15 @@ function wire() {
   };
 
   // dashboard
-  $("dClose").onclick = () => ($("dash").hidden = true);
-  $("dNew").onclick = async () => {
-    if (status.project && !(await closeProject())) return;
-    $("dash").hidden = true;
-    setPanel("import");
-  };
+  $("dClose").onclick = () => { $("dash").hidden = true; $("btnProjects").setAttribute("aria-pressed", false); };
+  $("dNew").onclick = openNew;
+  $("dTif").onclick = openGeotiff;
+  $("npFolder").onclick = () => npPick("folder");
+  $("npImages").onclick = () => npPick("images");
+  $("npName").oninput = () => { np.nameEdited = true; $("npCreate").disabled = !$("npName").value.trim() || (!np.folder && !np.files); clearTimeout(npTimer); npTimer = setTimeout(npSuggest, 300); };
+  $("npParent").onchange = npSuggest;
+  $("npBrowse").onclick = async () => { const p = await browse("folder", "Save the new project in", $("npParent").value); if (p) { $("npParent").value = p; npSuggest(); } };
+  $("newForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); npCreate(); } };
   $("dOpen").onclick = async () => { const p = await browse("folder", "Choose a FieldStitch project folder", $("dLoc").textContent); if (p) openProject(p); };
   $("dLocChange").onclick = async () => {
     const p = await browse("folder", "Save new projects in", $("dLoc").textContent);

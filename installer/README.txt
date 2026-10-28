@@ -24,20 +24,23 @@ The first time you run the installer, Windows SmartScreen may say it
 
 WORKFLOW
 --------
-FieldStitch opens straight onto the map. The buttons down the left side
-follow the job from top to bottom.
+FieldStitch opens on the Projects page.
 
-Import     Click Folder and pick the flight's folder (an SD card's DCIM
-           folder works; subfolders are included), or Images to pick
-           individual photos. A project is created and named after the
-           folder; click the name at the top to rename it. Import again
-           to add more photos to the same project.
-           GeoTIFF opens an existing orthomosaic so you can split and
-           export it without processing.
-           The map shows where each photo was taken:
-             green = RTK fixed, yellow = standard GPS,
-             red ring = tilted, grey ring = another camera (both skipped).
-           "Import details" lists anything that will be skipped.
+New project  Click New project, choose the flight's folder (subfolders are
+           included; an SD card's DCIM folder works) or pick individual
+           photos. The project is named after the folder; change the name
+           or where it is saved before clicking Create project. Once the
+           photos are loaded, the processing options open.
+           Open a GeoTIFF on the Projects page opens an existing
+           orthomosaic so you can split and export it without processing.
+           The Projects button at the top returns to this page; the pencil
+           next to the project name renames it.
+
+Photos     Shows the photos in the project. The map shows where each was
+           taken: green = RTK fixed, yellow = standard GPS, red ring =
+           tilted, grey ring = another camera (both skipped).
+           "Add more photos to this project" is for the same field only;
+           start a new project for a different flight or field.
            "Pick photos on map" processes only part of a big job.
 
 Process    Choose a processing type (Fast, Balanced or Accurate) and the

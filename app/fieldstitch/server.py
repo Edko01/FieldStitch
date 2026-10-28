@@ -295,8 +295,8 @@ def name_from_source(folder=None, files=None):
     return nm or "Unnamed project"
 
 
-def quick_start(folder=None, files=None, recursive=True, parent=None):
-    """Pix4Dfields-style start: create a project named after the photos and begin reading them."""
+def quick_start(folder=None, files=None, recursive=True, parent=None, name=None):
+    """Create a project (named after the photos unless a name is given) and begin reading them."""
     if S.running():
         raise ApiError("Processing is running. Stop it before starting another project.")
     if files:
@@ -306,9 +306,16 @@ def quick_start(folder=None, files=None, recursive=True, parent=None):
     elif not folder or not os.path.isdir(folder):
         raise ApiError("Folder not found: %s" % folder)
     parent = parent or S.cfg.get("projects_dir") or default_projects_dir()
-    name = name_from_source(folder, files)
+    name = (name or "").strip() or name_from_source(folder, files)
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as e:
+        raise ApiError("Can't create the folder %s: %s" % (parent, e.strerror or e))
     d = unique_project_dir(parent, name)
     P.create_project(d, name)
+    if os.path.normcase(parent) != os.path.normcase(S.cfg.get("projects_dir") or default_projects_dir()):
+        S.cfg["projects_dir"] = parent
+        S.save_cfg()
     open_project(d)
     start_scan(folder, files, recursive)
     return d
@@ -892,8 +899,16 @@ class Handler(BaseHTTPRequestHandler):
             open_project(d)
             return {"dir": d}
         if path == "/api/project/start":
-            d = quick_start(b.get("folder"), b.get("files") or None, b.get("recursive", True), b.get("parent"))
+            d = quick_start(b.get("folder"), b.get("files") or None, b.get("recursive", True), b.get("parent"),
+                            b.get("name"))
             return {"dir": d}
+        if path == "/api/project/suggest":
+            files = [f for f in (b.get("files") or []) if f]
+            folder = b.get("folder") or None
+            parent = b.get("parent") or S.cfg.get("projects_dir") or default_projects_dir()
+            name = (b.get("name") or "").strip() or name_from_source(folder, files or None)
+            n_files = len(files)
+            return {"name": name, "parent": parent, "dir": unique_project_dir(parent, name), "files": n_files}
         if path == "/api/geotiff/open":
             return {"dir": open_geotiff(b.get("path") or "")}
         if path == "/api/projects_dir":
