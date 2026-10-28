@@ -5,6 +5,7 @@ import multiprocessing as mp
 import os
 import pickle
 import shutil
+import sys
 import time
 import traceback
 
@@ -68,14 +69,22 @@ class Timer:
     """Wall-clock time per stage plus summed worker CPU time per sub-step."""
 
     def __init__(self):
+        from .sysinfo import cpu_times
+        self._cpu = cpu_times
         self.t = time.time()
+        self.c = cpu_times()
         self.stages = []
+        self.busy = {}
         self.workers = {}
 
     def lap(self, name):
         now = time.time()
+        c = self._cpu()
+        if c and self.c and c[1] > self.c[1]:
+            self.busy[name] = 1.0 - (c[0] - self.c[0]) / float(c[1] - self.c[1])
         self.stages.append((name, now - self.t))
         self.t = now
+        self.c = c
 
     def add(self, group, d):
         g = self.workers.setdefault(group, {})
@@ -86,7 +95,9 @@ class Timer:
         total = sum(v for _, v in self.stages) or 1.0
         log("Timing summary (wall clock):")
         for name, v in self.stages:
-            log("  %-26s %7.1f s  %4.1f%%" % (name, v, 100 * v / total))
+            b = self.busy.get(name)
+            log("  %-26s %7.1f s  %4.1f%%%s" % (name, v, 100 * v / total,
+                                               ("   CPU busy %3.0f%%" % (100 * b)) if b is not None and v >= 2 else ""))
         for group, d in self.workers.items():
             if group == "render" and "total" in d:
                 d = dict(d)
@@ -100,6 +111,7 @@ class Timer:
 
     def as_dict(self):
         return {"stages": [[n, round(v, 2)] for n, v in self.stages],
+                "cpu_busy": {k: round(v, 3) for k, v in self.busy.items()},
                 "workers": {g: {k: round(v, 2) for k, v in d.items()} for g, d in self.workers.items()}}
 
 
@@ -267,6 +279,9 @@ def _run(project_dir, prog):
     if sysd.get("photo_drives"):
         log("Photo drive type: %s | project drive: %s, %s GB free" % (", ".join(sysd["photo_drives"]),
             sysd.get("project_drive"), sysd.get("project_free_gb")))
+    if sys.platform == "win32":
+        from .sysinfo import full_speed
+        log("Windows background throttling: %s" % ("off for processing" if full_speed() else "could not be changed"))
 
     # ---------------------------------------------------------------- select photos
     photos = proj["photos"]
@@ -902,6 +917,8 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
 
 
 def _noop_init(_):
+    from .sysinfo import full_speed
+    full_speed()
     try:
         import cv2
         cv2.setNumThreads(1)

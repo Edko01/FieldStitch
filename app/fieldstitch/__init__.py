@@ -1,5 +1,5 @@
 """FieldStitch - fast offline orthomosaic generation from drone photos."""
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 APP_NAME = "FieldStitch"
 UPDATE_REPO = "Edko01/FieldStitch"   # GitHub repo that hosts updates/latest.json
 RUNTIME = 2                          # version of the bundled python/ folder this app needs

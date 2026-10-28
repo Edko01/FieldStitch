@@ -16,6 +16,8 @@ _CACHE_MAX = 48
 
 def init_worker(ctx_file):
     global _CTX
+    from .sysinfo import full_speed
+    full_speed()
     with open(ctx_file, "rb") as f:
         _CTX = pickle.load(f)
     try:

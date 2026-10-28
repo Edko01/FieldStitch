@@ -110,3 +110,52 @@ def describe(project_dir=None, photo_dirs=()):
     if kinds:
         info["photo_drives"] = kinds
     return info
+
+
+def full_speed():
+    """Ask Windows not to treat this (windowless, background) process as low priority work.
+
+    Windows 11 applies "power throttling" (EcoQoS / efficiency mode) to background processes:
+    on Intel hybrid CPUs their threads are steered to the efficiency cores at low clock speeds.
+    Processing workers have no window, so without this they can run far below the CPU's
+    capacity. Safe to call anywhere; does nothing on other systems."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PPTS(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG),
+                        ("StateMask", wintypes.ULONG)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.SetProcessInformation.restype = wintypes.BOOL
+        h = k32.GetCurrentProcess()
+        # ProcessPowerThrottling = 4; control EXECUTION_SPEED (1) and IGNORE_TIMER_RESOLUTION (4); state 0 = off
+        st = _PPTS(1, 0x1 | 0x4, 0)
+        ok = bool(k32.SetProcessInformation(h, 4, ctypes.byref(st), ctypes.sizeof(st)))
+        k32.SetPriorityClass(h, 0x20)  # NORMAL_PRIORITY_CLASS
+        return ok
+    except Exception:
+        return False
+
+
+def cpu_times():
+    """(idle, total) CPU time counters for the whole machine, for measuring how busy it is."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            i, k, u = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+            ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(i), ctypes.byref(k), ctypes.byref(u))
+            f = lambda t: (t.dwHighDateTime << 32) | t.dwLowDateTime  # noqa
+            return f(i), f(k) + f(u)   # kernel time includes idle time
+        with open("/proc/stat") as fh:
+            v = [int(x) for x in fh.readline().split()[1:]]
+        idle = v[3] + (v[4] if len(v) > 4 else 0)
+        return idle, sum(v)
+    except Exception:
+        return None

@@ -1,8 +1,8 @@
 {
- "version": "1.5.2",
+ "version": "1.5.3",
  "runtime": 2,
- "app_zip": "updates/fieldstitch-app-1.5.2.zip",
- "sha256": "0ec06d135e82cd143555920ff9b338520bd8601ec1efc4740e67456241746570",
- "notes": "FieldStitch 1.5.2 - speed fixes from the Rocking R run:\n- Matching: fixed a slowdown in 1.5.0 where each worker started many extra math threads and they competed for the CPU.\n- Feature detection: the CPU keeps all its workers and the graphics card adds to them, instead of the card taking CPU workers away. The log now shows the card's own timings.\n- Track building is several times faster.\n- Rendering: the GeoTIFF and its overview file are written by separate threads, so the render workers no longer wait for the file to be written.",
+ "app_zip": "updates/fieldstitch-app-1.5.3.zip",
+ "sha256": "1829a598f5e5177301195bb6e771dc3ef317f49446a48769d1e52d28e597f3f3",
+ "notes": "FieldStitch 1.5.3 - full CPU use:\n- Processing workers now tell Windows they are not background work. Windows 11 throttles windowless background processes (\"efficiency mode\"), which can hold them to the slower efficiency cores at low clock speeds.\n- The log's timing summary now shows how busy the CPU was during each step, so slow steps are easy to spot.\nIncludes 1.5.2: matching slowdown fix, the CPU keeps all workers when the graphics card helps, faster track building, threaded GeoTIFF writing.",
  "date": "2026-10-28"
 }

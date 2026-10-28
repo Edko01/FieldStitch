@@ -9,5 +9,7 @@ if HERE not in sys.path:
 if __name__ == "__main__":
     import multiprocessing as mp
     mp.freeze_support()
+    from fieldstitch.sysinfo import full_speed
+    full_speed()
     from fieldstitch.pipeline import run
     run(sys.argv[1])

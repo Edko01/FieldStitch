@@ -162,6 +162,8 @@ _T = {"read": 0.0, "decode": 0.0, "warp": 0.0, "total": 0.0, "bytes": 0, "loads"
 
 def init_render(ctx_file):
     global _RCTX
+    from .sysinfo import full_speed
+    full_speed()
     with open(ctx_file, "rb") as f:
         _RCTX = pickle.load(f)
     _RCTX["bboxes"] = np.array([cam["bbox"] for cam in _RCTX["cams"]], np.float64).reshape(-1, 4)

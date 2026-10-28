@@ -156,6 +156,8 @@ def extract(task):
 
 def cpu_worker_main(task_q, res_q):
     """Feature worker process pulling from a shared queue (used next to GPU workers)."""
+    from .sysinfo import full_speed
+    full_speed()
     try:
         cv2.setNumThreads(1)
     except Exception:
@@ -213,6 +215,8 @@ def gpu_worker_main(task_q, res_q, n_threads, wid):
     Falls back to OpenCV SIFT (still threaded) if the GPU is unavailable or fails."""
     import queue
     import threading
+    from .sysinfo import full_speed
+    full_speed()
     try:
         cv2.setNumThreads(1)
     except Exception:
