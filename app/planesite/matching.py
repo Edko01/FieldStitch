@@ -176,7 +176,15 @@ def _verify(c, i, j, ui, uj, q, t):
     pi = ui[q].astype(np.float32)
     pj = uj[t].astype(np.float32)
     method = getattr(cv2, "USAC_MAGSAC", cv2.FM_RANSAC)
-    F, mask = cv2.findFundamentalMat(pi, pj, method, c["ransac_thr"], 0.999, 10000)
+    try:
+        F, mask = cv2.findFundamentalMat(pi, pj, method, c["ransac_thr"], 0.999, 10000)
+    except cv2.error:
+        # OpenCV's MAGSAC can fail an internal check on near-degenerate point sets (seen on 1 of
+        # 76,812 pairs); plain RANSAC handles them
+        try:
+            F, mask = cv2.findFundamentalMat(pi, pj, cv2.FM_RANSAC, c["ransac_thr"], 0.999, 10000)
+        except cv2.error:
+            return None, None, 0
     if F is None or mask is None:
         return None, None, 0
     mask = mask.ravel().astype(bool)
