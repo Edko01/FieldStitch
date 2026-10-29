@@ -872,7 +872,14 @@ function renderAreaList() {
     del.title = "Remove area";
     del.setAttribute("aria-label", "Remove " + a.name);
     del.onclick = () => { areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
-    li.append(nm, sz, del);
+    const send = document.createElement("button");
+    const sentAt = a.pilot2 && a.pilot2.sent && a.pilot2.sent.at;
+    send.className = "send" + (sentAt ? " sent" : "");
+    send.innerHTML = '<svg aria-hidden="true"><use href="#i-send"/></svg>';
+    send.title = sentAt ? "Send to Pilot 2 (last sent " + sentAt + ")" : "Send to Pilot 2";
+    send.setAttribute("aria-label", "Send " + a.name + " to Pilot 2");
+    send.onclick = () => openPilot2(a.id);
+    li.append(nm, sz, send, del);
     ul.append(li);
   }
   $("areaHead").hidden = !areas.length;
@@ -888,6 +895,119 @@ function focusArea(id, zoom, noScroll) {
   if (!noScroll) {
     const li = document.querySelector('#areaList li[data-id="' + id + '"]');
     if (li) li.scrollIntoView({ block: "nearest" });
+  }
+}
+
+// ------------------------------------------------------------------ send to Pilot 2
+const p2 = { id: null, timer: 0, conn: null, seq: 0 };
+const p2Fields = { height_m: "p2Height", speed_ms: "p2Speed", margin_m: "p2Margin", overlap_front: "p2OvH", overlap_side: "p2OvW", direction: "p2Dir" };
+async function openPilot2(id) {
+  const a = areas.find((x) => x.id === id);
+  if (!a) return;
+  p2.id = id;
+  setErr("p2Err", "");
+  $("p2Ok").hidden = true;
+  $("p2Field").textContent = a.name;
+  $("p2Est").textContent = "Working out the mission…";
+  $("p2Notes").innerHTML = "";
+  $("p2Name").value = "";
+  try {
+    p2.conn = await api("/api/pilot2/settings");
+    $("p2Url").value = p2.conn.hub_url;
+    $("p2User").value = p2.conn.user || "";
+    $("p2Key").value = "";
+    p2ConnState();
+    const r = await api("/api/pilot2/preview", { id });
+    p2Fill(r, true);
+  } catch (e) { setErr("p2Err", e.message); }
+  if (!$("p2Dlg").open) $("p2Dlg").showModal();
+}
+function p2ConnState() {
+  const c = p2.conn || {};
+  $("p2ConnState").textContent = c.has_key ? "· connected with the saved office password" : "· enter the office password to send";
+  $("p2Conn").open = !c.has_key;
+}
+function p2Read() {
+  const s = { auto_direction: $("p2Auto").checked };
+  for (const [k, id] of Object.entries(p2Fields)) { const v = $(id).value; if (v !== "") s[k] = +v; }
+  return s;
+}
+function p2Fill(r, first) {
+  const s = r.settings;
+  for (const [k, id] of Object.entries(p2Fields)) {
+    if (first || k === "direction") $(id).value = k === "height_m" ? +(+s[k]).toFixed(1) : Math.round(s[k] * 10) / 10;
+  }
+  if (first) { $("p2Auto").checked = !!s.auto_direction; $("p2Name").value = r.name; }
+  $("p2Dir").disabled = $("p2Auto").checked;
+  $("p2Axis").textContent = "(" + Math.round(s.long_axis) + "°)";
+  const e = r.estimates;
+  $("p2Gsd").textContent = "≈ " + fmt(e.gsd_cm, 1) + " cm per pixel";
+  $("p2Est").innerHTML = "";
+  const parts = [
+    ["Field", acHa(e.area_ha)],
+    ["Flight lines", e.lines + " lines, " + fmt(e.line_spacing_m, 1) + " m apart"],
+    ["Photos", "≈ " + fmt(e.photos) + " (every " + fmt(e.photo_spacing_m, 1) + " m)"],
+    ["Flight", "≈ " + fmt(e.length_km, 1) + " km, " + fmtDur(e.minutes * 60).replace("≈ ", "") + ", " + e.batteries + (e.batteries === 1 ? " battery" : " batteries")],
+  ];
+  for (const [k, v] of parts) { const b = document.createElement("b"); b.textContent = k + ": "; $("p2Est").append(b, v, document.createElement("br")); }
+  const small = document.createElement("small");
+  small.textContent = "Office estimate. Pilot 2 works out the exact path." + (r.last ? " Last sent " + r.last.at + "." : "");
+  $("p2Est").append(small);
+  const ul = $("p2Notes");
+  ul.innerHTML = "";
+  for (const n of r.notes || []) { const li = document.createElement("li"); li.textContent = n; ul.append(li); }
+}
+function p2Changed() {
+  clearTimeout(p2.timer);
+  $("p2Dir").disabled = $("p2Auto").checked;
+  p2.timer = setTimeout(async () => {
+    const seq = ++p2.seq;
+    try {
+      const r = await api("/api/pilot2/preview", { id: p2.id, settings: p2Read() });
+      if (seq === p2.seq) { setErr("p2Err", ""); p2Fill(r, false); }
+    } catch (e) { if (seq === p2.seq) setErr("p2Err", e.message); }
+  }, 250);
+}
+async function p2SaveConn() {
+  const c = p2.conn || {};
+  const body = {};
+  if ($("p2Url").value.trim() !== (c.hub_url || "")) body.hub_url = $("p2Url").value.trim();
+  if ($("p2User").value.trim() !== (c.user || "")) body.user = $("p2User").value.trim();
+  if ($("p2Key").value) body.key = $("p2Key").value;
+  if (!Object.keys(body).length) return;
+  p2.conn = await api("/api/pilot2/settings", body);
+  $("p2Key").value = "";
+  p2ConnState();
+}
+async function p2Go(upload) {
+  setErr("p2Err", "");
+  $("p2Ok").hidden = true;
+  const btn = upload ? $("p2Send") : $("p2Save");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = upload ? "Sending…" : "Saving…";
+  try {
+    await p2SaveConn();
+    if (upload && !(p2.conn && p2.conn.has_key)) throw new Error("Enter the hub's office password under Hub connection.");
+    const r = await api("/api/pilot2/send", { id: p2.id, settings: p2Read(), name: $("p2Name").value, upload });
+    $("p2Name").value = r.name;
+    let msg;
+    if (upload) {
+      msg = "Sent “" + r.name + "”" + (r.hub && r.hub.replaced ? ", replacing the earlier version on the hub" : "") +
+        ". In Pilot 2 it is in Flight Route → cloud library: download it to open the boundary and flight lines.";
+    } else {
+      msg = "Saved " + r.path + ".";
+    }
+    $("p2Ok").textContent = msg;
+    $("p2Ok").hidden = false;
+    const a = areas.find((x) => x.id === p2.id);
+    if (a && r.pilot2) { a.pilot2 = r.pilot2; renderAreaList(); }
+  } catch (e) {
+    setErr("p2Err", e.message);
+    if (/password/i.test(e.message)) $("p2Conn").open = true;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
 }
 
@@ -1184,6 +1304,13 @@ function wire() {
   document.querySelectorAll("input[name=expcomp], input[name=expscale]").forEach((r) => (r.onchange = requestExportEstimate));
   $("expOverviews").onchange = requestExportEstimate;
   $("exportBrowse").onclick = async () => { const p = await browse("folder", "Save exported GeoTIFFs in", $("exportDir").value); if (p) $("exportDir").value = p; };
+  // send to Pilot 2
+  for (const id of Object.values(p2Fields)) $(id).oninput = p2Changed;
+  $("p2Auto").onchange = p2Changed;
+  $("p2Save").onclick = () => p2Go(false);
+  $("p2Form").onsubmit = (e) => { if (e.submitter && e.submitter.value === "send") { e.preventDefault(); p2Go(true); } };
+  $("p2Form").onkeydown = (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.preventDefault(); };
+
   $("expForm").onsubmit = (e) => {
     if (e.submitter && e.submitter.value === "export") { e.preventDefault(); startExport(); }
   };
