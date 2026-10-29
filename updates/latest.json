@@ -1,8 +1,8 @@
 {
- "version": "1.6.7",
+ "version": "1.6.6",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.7.zip",
- "sha256": "2e38dc26817e69add1fd37013a335e4e6eb9cd4937af5d8941bd210a7c043548",
- "notes": "PlaneSite 1.6.7:\n- Send to Pilot 2: each field in the Areas list has a new send button. It turns the field's outline into a DJI mapping mission (flight height, speed, overlaps, edge buffer and flight-line direction, with an estimate of lines, photos, flight time and batteries) and uploads it to the PlaneSite hub. The pilot then finds it in Pilot 2 under Flight Route, cloud library, and downloads it to open the boundary and flight lines.\n- The first time, open Hub connection in that window and enter the hub's office password. It is kept in Windows Credential Manager, not in PlaneSite's files.\n- Sending a field again with the same mission name replaces the copy on the hub. Every mission file is also saved in the project's exports\\Pilot 2 folder.",
+ "app_zip": "updates/planesite-app-1.6.6.zip",
+ "sha256": "03279eb6233ac205cb5fed29f953f37d791d1c90b4a16fa7832d4ec258406c7e",
+ "notes": "PlaneSite 1.6.6:\n- Smooth zooming again: the map first draws quick tiles so zooming and panning respond at once, then sharpens to full screen detail a moment after you stop (1.6.5 waited for the sharp tiles on every zoom step). Background tile preparation now gives way while you move the map.\n- Bright surfaces keep their detail: white equipment, roofs and concrete roll off smoothly instead of clipping to flat white, without changing their colour. Process the project again to apply this one (the feature step is reused).",
  "date": "2026-10-29"
 }

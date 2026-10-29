@@ -554,121 +554,21 @@ def areas_for_client(areas):
         st = area_stats(a)
         out.append({"id": a["id"], "name": a["name"], "kind": a.get("kind", ""), "rings": rings,
                     "ha": float(st["ha"]), "ac": float(st["ac"])})
-        if a.get("pilot2"):
-            out[-1]["pilot2"] = {k: a["pilot2"][k] for k in ("name", "sent") if k in a["pilot2"]}
     return out
 
 
 def areas_from_client(lst):
     from .export import new_id
     epsg, e0, n0 = S.origin
-    old = {a["id"]: a for a in load_areas()}
     out = []
     for a in lst:
         rings = [[[p[0] + e0, p[1] + n0] for p in r] for r in a["rings"]]
         for r in rings:
             if r[0] != r[-1]:
                 r.append(list(r[0]))
-        aid = a.get("id") or new_id()
-        new = {k: v for k, v in old.get(aid, {}).items() if k not in ("id", "name", "kind", "rings")}
-        new.update({"id": aid, "name": a.get("name") or "Area", "kind": a.get("kind", "drawn"), "rings": rings})
-        out.append(new)
+        out.append({"id": a.get("id") or new_id(), "name": a.get("name") or "Area", "kind": a.get("kind", "drawn"),
+                    "rings": rings})
     return out
-
-
-# ------------------------------------------------------------------- Pilot 2
-def pilot2_settings():
-    from . import pilot2
-    try:
-        has_key = bool(pilot2.load_key())
-    except Exception:
-        has_key = False
-    d = dict(pilot2.DEFAULTS)
-    d.update(S.cfg.get("pilot2") or {})
-    return {"hub_url": S.cfg.get("hub_url") or pilot2.DEFAULT_HUB, "default_hub": pilot2.DEFAULT_HUB,
-            "user": S.cfg.get("hub_user") or "", "has_key": has_key, "defaults": d}
-
-
-def pilot2_set(b):
-    from . import pilot2
-    if "hub_url" in b:
-        u = (b.get("hub_url") or "").strip().rstrip("/")
-        if u and not re.match(r"^https?://[^\s/]+", u):
-            raise ApiError("The hub address should start with https://")
-        S.cfg["hub_url"] = u or pilot2.DEFAULT_HUB
-    if "user" in b:
-        S.cfg["hub_user"] = (b.get("user") or "").strip()[:60]
-    if b.get("key") is not None and (b.get("key") or b.get("clear_key")):
-        try:
-            pilot2.save_key(b.get("key") or "")
-        except OSError as e:
-            raise ApiError(str(e))
-    S.save_cfg()
-    return pilot2_settings()
-
-
-def _pilot2_area(b):
-    from . import pilot2
-    if not S.origin:
-        raise ApiError("Open a project first.")
-    area = next((a for a in load_areas() if a["id"] == b.get("id")), None)
-    if area is None:
-        raise ApiError("That field no longer exists.")
-    given = dict(S.cfg.get("pilot2") or {})
-    given.update((area.get("pilot2") or {}).get("settings") or {})
-    given.update(b.get("settings") or {})
-    try:
-        s, ring, ring_ll, est, notes = pilot2.prepare(area, S.origin[0], given)
-    except ValueError as e:
-        raise ApiError(str(e))
-    default_name = (area.get("pilot2") or {}).get("name") or "%s - %s" % (S.proj["name"], area["name"])
-    name = pilot2.clean_name(b.get("name") or default_name)
-    return area, s, ring_ll, est, notes, name
-
-
-def pilot2_preview(b):
-    area, s, ring_ll, est, notes, name = _pilot2_area(b)
-    return {"settings": s, "estimates": est, "notes": notes, "name": name, "corners": len(ring_ll) - 1,
-            "last": (area.get("pilot2") or {}).get("sent")}
-
-
-def pilot2_send(b):
-    """Write the plan-only KMZ (kept in the project's exports folder) and, unless only saving,
-    upload it to the hub. Same mission name replaces the copy on the hub."""
-    from . import pilot2
-    area, s, ring_ll, est, notes, name = _pilot2_area(b)
-    kmz = pilot2.build_kmz(ring_ll, s)
-    out_dir = os.path.join(S.dir, "exports", "Pilot 2")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, name + ".kmz")
-    with open(path, "wb") as f:
-        f.write(kmz)
-    res = {"path": path, "name": name, "bytes": len(kmz), "estimates": est, "notes": notes}
-    keep = {k: s[k] for k in pilot2.DEFAULTS}
-    if b.get("upload", True):
-        try:
-            hub = pilot2.upload(S.cfg.get("hub_url") or pilot2.DEFAULT_HUB, pilot2.load_key(), kmz, name + ".kmz",
-                                name=name, user=S.cfg.get("hub_user") or None)
-        except (PermissionError, ConnectionError, RuntimeError) as e:
-            raise ApiError(str(e))
-        res["hub"] = hub
-        sent = {"at": time.strftime("%Y-%m-%d %H:%M"), "hub_id": hub.get("id"), "replaced": bool(hub.get("replaced"))}
-    else:
-        sent = None
-    # remember: these settings for this field, and as the starting point for new fields
-    areas = load_areas()
-    for a in areas:
-        if a["id"] == area["id"]:
-            rec = dict(a.get("pilot2") or {})
-            rec.update({"settings": keep, "name": name})
-            if sent:
-                rec["sent"] = sent
-            a["pilot2"] = rec
-            res["pilot2"] = rec
-    save_areas(areas)
-    S.cfg["pilot2"] = {k: keep[k] for k in keep if k != "direction" or not keep["auto_direction"]}
-    S.save_cfg()
-    return res
 
 
 def check_ortho_crs():
@@ -1049,8 +949,6 @@ class Handler(BaseHTTPRequestHandler):
                     "update": dict(updater.state)}
         if path == "/api/projects":
             return {"projects": recent_projects(), "dir": S.cfg.get("projects_dir") or default_projects_dir()}
-        if path == "/api/pilot2/settings":
-            return pilot2_settings()
         if path == "/api/update/check":
             info = updater.check()
             info.pop("_download", None)
@@ -1226,12 +1124,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/process/cancel":
             cancel_processing()
             return {}
-        if path == "/api/pilot2/settings":
-            return pilot2_set(b)
-        if path == "/api/pilot2/preview":
-            return pilot2_preview(b)
-        if path == "/api/pilot2/send":
-            return pilot2_send(b)
         if path == "/api/areas":
             save_areas(areas_from_client(b.get("areas", [])))
             return {"areas": areas_for_client(load_areas())}

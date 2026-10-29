@@ -26,7 +26,6 @@
   <symbol id="i-close" viewBox="0 0 20 20"><path d="M5 5l10 10M15 5 5 15"/></symbol>
   <symbol id="i-pencil" viewBox="0 0 20 20"><path d="M13.5 3.5l3 3L7 16H4v-3z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></symbol>
-  <symbol id="i-send" viewBox="0 0 20 20"><path d="M3 9.5 17 3l-5 14-2.5-5.5zM9.5 11.5 17 3"/></symbol>
   <symbol id="i-fit" viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></symbol>
 </svg>
 
@@ -318,41 +317,6 @@
     <div class="btnrow end">
       <button class="ghost" value="cancel">Cancel</button>
       <button class="primary" id="btnExport" value="export">Export</button>
-    </div>
-  </form>
-</dialog>
-
-<!-- ===== send to Pilot 2 ===== -->
-<dialog class="modal wide" id="p2Dlg" aria-labelledby="p2Title">
-  <form method="dialog" id="p2Form">
-    <header class="modalhead"><h2 id="p2Title">Send to Pilot 2</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
-    <p class="hint small">A mapping mission for <b id="p2Field"></b>. Pilot 2 builds the flight lines when the pilot downloads it from the cloud library.</p>
-    <label>Mission name in Pilot 2
-      <input id="p2Name" maxlength="80" autocomplete="off">
-    </label>
-    <div class="p2grid">
-      <label>Flight height (m)<input type="number" id="p2Height" step="0.1" min="12" max="500"><small class="muted" id="p2Gsd"></small></label>
-      <label>Speed (m/s)<input type="number" id="p2Speed" step="0.5" min="1" max="15"></label>
-      <label>Edge buffer (m)<input type="number" id="p2Margin" step="1" min="0" max="200"></label>
-      <label>Front overlap (%)<input type="number" id="p2OvH" step="1" min="10" max="95"></label>
-      <label>Side overlap (%)<input type="number" id="p2OvW" step="1" min="10" max="95"></label>
-      <label>Flight lines (° from north)<input type="number" id="p2Dir" step="1" min="0" max="359"></label>
-    </div>
-    <label class="check"><input type="checkbox" id="p2Auto"> Run the flight lines along the field's long side <small class="muted" id="p2Axis"></small></label>
-    <p class="expest" id="p2Est"></p>
-    <ul class="p2notes" id="p2Notes"></ul>
-    <details class="p2conn" id="p2Conn">
-      <summary>Hub connection <small class="muted" id="p2ConnState"></small></summary>
-      <label>Hub address<input id="p2Url" autocomplete="off" spellcheck="false"></label>
-      <label>Office password<input type="password" id="p2Key" autocomplete="off" placeholder="Kept in Windows Credential Manager"></label>
-      <label>Author shown in Pilot 2 <small class="muted">(optional)</small><input id="p2User" maxlength="60" autocomplete="off"></label>
-    </details>
-    <p class="form-error" id="p2Err" role="alert"></p>
-    <p class="p2ok" id="p2Ok" role="status" hidden></p>
-    <div class="btnrow end">
-      <button class="ghost" value="cancel">Close</button>
-      <button class="ghost" type="button" id="p2Save" title="Write the mission file without sending it">Save file only</button>
-      <button class="primary" id="p2Send" value="send">Send to Pilot 2</button>
     </div>
   </form>
 </dialog>
