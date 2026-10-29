@@ -1,8 +1,8 @@
 {
- "version": "1.6.8",
+ "version": "1.6.9",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.8.zip",
- "sha256": "f96ee00f744ab3e80f733c86258673ee3e9d74873c6dd3922b94057bd43a0911",
- "notes": "PlaneSite 1.6.8:\n- Much faster GeoTIFF export. Exporting the whole orthomosaic now copies the finished tiles straight into the new file instead of decompressing and compressing every pixel again, so it takes about as long as copying the file. Field exports copy the tiles inside the field the same way and only redo the tiles along the field edge, several at a time.\n- No extra quality loss: exported pixels are the orthomosaic's own pixels (before, every export went through a second round of JPEG compression).\n- Field exports now line up with the orthomosaic's 512-pixel tiles, so a field's file can extend a few metres past the field outline; that margin is transparent, as before.",
+ "app_zip": "updates/planesite-app-1.6.9.zip",
+ "sha256": "d3d265085eec5b530aeff96f8c74405ef5a131dd6a6428a97ed7a70bbfb3185d",
+ "notes": "PlaneSite 1.6.9:\n- The fast GeoTIFF export from 1.6.8 now actually runs when you export from the Export window. 1.6.8 only used it when the compression was left unspecified, and the Export window always names it, so exports still took the old, slow route. Exporting the whole orthomosaic now takes about as long as copying the file, and field exports copy every tile inside the field and only redo the tiles along the edge.\n- Exporting in the orthomosaic's own compression (Compact/JPEG for a normal project) adds no extra quality loss. Choosing a different compression or a smaller size still uses the slower route.",
  "date": "2026-10-29"
 }

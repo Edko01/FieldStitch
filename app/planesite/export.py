@@ -471,7 +471,7 @@ def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90,
     recompressing (fast, no extra JPEG loss): the whole orthomosaic as is, an area cut on the
     orthomosaic's 512-pixel tile grid (the extra margin is transparent)."""
     scale = float(scale or 1.0)
-    if scale >= 0.999 and compression in ("same", None) and not os.environ.get("PLANESITE_SLOW_EXPORT"):
+    if scale >= 0.999 and _same_codec(ortho_path, compression) and not os.environ.get("PLANESITE_SLOW_EXPORT"):
         from . import tiffcopy
         try:
             if area is None:
@@ -490,6 +490,20 @@ def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90,
 
 
 FAST_FAILURES = []     # reasons the fast export wasn't used (shown in diagnostics)
+
+
+def _same_codec(ortho_path, compression):
+    """Whether the export asks for the orthomosaic's own compression (the export window names it:
+    "jpeg" or "deflate"; "same" means keep it)."""
+    if compression in ("same", None, ""):
+        return True
+    try:
+        import rasterio
+        with rasterio.open(ortho_path) as d:
+            c = d.compression.value.lower() if d.compression is not None else ""
+    except Exception:
+        return False
+    return str(compression).lower() == c
 
 
 def _log_fast_fail(e):
