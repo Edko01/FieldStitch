@@ -582,7 +582,7 @@ def render_worker_main(ctx_file, task_q, res_q, link=None, wid=0):
                     res, snap2 = render_group(group)
                     for k, v in snap2.items():
                         snap[k] = snap.get(k, 0) + v
-                res_q.put(("ok", res, snap))
+                res_q.put(("ok", ship(res, snap), snap))
 
         while True:
             seg = task_q.get()
@@ -592,11 +592,11 @@ def render_worker_main(ctx_file, task_q, res_q, link=None, wid=0):
                 if gl is not None and gl.usable():
                     r = _gpu_group(gl, group)
                     if r is not None:
-                        res_q.put(("ok",) + r)
+                        res_q.put(("ok", ship(r[0], r[1]), r[1]))
                     finish(gl.collect(block=not gl.free))
                 else:
                     res, snap = render_group(group)
-                    res_q.put(("ok", res, snap))
+                    res_q.put(("ok", ship(res, snap), snap))
                     if gl is not None and gl.out:
                         finish(gl.collect(block=False))
         while gl is not None and gl.out:
@@ -606,6 +606,21 @@ def render_worker_main(ctx_file, task_q, res_q, link=None, wid=0):
     finally:
         if gl is not None:
             gl.close()
+
+
+def ship(res, snap):
+    """Before tiles go to the writer: JPEG-compress the GeoTIFF tiles here, in parallel with the
+    other workers, when the main process uses its own TIFF writer."""
+    q = _RCTX.get("tiff_jpeg_q") if _RCTX else None
+    if q is None:
+        return res
+    from .tiffwriter import encode_tiles
+    t0 = time.perf_counter()
+    out = []
+    for tile, rgb, alpha, h_rgb, h_alpha in res:
+        out.append((tile, encode_tiles(tile, rgb, alpha, q), None, h_rgb, h_alpha))
+    snap["encode"] = snap.get("encode", 0.0) + time.perf_counter() - t0
+    return out
 
 
 def _snap():

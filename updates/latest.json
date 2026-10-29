@@ -1,8 +1,8 @@
 {
- "version": "1.6.2",
+ "version": "1.6.3",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.2.zip",
- "sha256": "a0ebc4a93e7d1b9f744d486e5ac7c4b9c1170e10c96f97ce45b3a7a1489b2bcd",
- "notes": "PlaneSite 1.6.2 - colour:\n- Each flight (battery) now gets its own sun-angle correction, because the sun moves between flights. In tests this cut the leftover colour differences across a multi-flight job by about five times.\n- The mosaic keeps the photos' overall brightness (1.6.1 came out slightly darker).\n- New Colours option under Processing options: Vivid (default) adds contrast and colour, similar to Pix4D, the same over the whole mosaic. Natural keeps the photos' own contrast and colour.\nProcess the project again to apply (the feature step is reused).",
+ "app_zip": "updates/planesite-app-1.6.3.zip",
+ "sha256": "8e33946a7bc79328fa592080101efed7e9b71227565c51517cf6f80c79e3f586",
+ "notes": "PlaneSite 1.6.3 - faster GeoTIFF writing:\n- The render workers now compress the GeoTIFF's tiles in parallel; before, one writer did all the compressing and held rendering back (about 3 minutes of a 16-gigapixel job). The file is the same as before: same format, size and pixels, readable by GDAL, QGIS and ArcGIS.\n- Includes the 1.6.2 colour changes.",
  "date": "2026-10-29"
 }

@@ -1010,7 +1010,10 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
            "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
            "cache_bytes": cache_bytes,
-           "min_views": 2 if settings.get("trim_edges", True) else 1, "look": look}
+           "min_views": 2 if settings.get("trim_edges", True) else 1, "look": look,
+           # JPEG mosaics: workers compress the GeoTIFF tiles themselves (tiffwriter.py)
+           "tiff_jpeg_q": int(settings.get("jpeg_quality", 90)) if settings.get("compression", "jpeg") == "jpeg"
+           and not os.environ.get("PLANESITE_GDAL_WRITER") else None}
     ctx_file = os.path.join(work, "render_ctx.pkl")
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
@@ -1034,7 +1037,15 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     jpeg = prof["compress"] == "JPEG"
     prog.set("ortho", 0, "Rendering orthomosaic", force=True)
     with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True, GDAL_NUM_THREADS="ALL_CPUS"):
-        with rasterio.open(tmp, "w", **prof) as dst, rasterio.open(tmp_ovr, "w", **prof_half) as ovr:
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            own_writer = ctx["tiff_jpeg_q"] is not None
+            if own_writer:
+                from .tiffwriter import JpegTiffWriter
+                dst = JpegTiffWriter(tmp, out_w, out_h, prof["crs"], prof["transform"], ctx["tiff_jpeg_q"])
+            else:
+                dst = stack.enter_context(rasterio.open(tmp, "w", **prof))
+            ovr = stack.enter_context(rasterio.open(tmp_ovr, "w", **prof_half))
             if not jpeg:
                 dst.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
                 ovr.colorinterp = [ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha]
@@ -1098,7 +1109,10 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                         tw0 = time.time()
                         for (tx, ty, tw, th), rgb, alpha, h_rgb, h_alpha in res_:
                             if which == "main":
-                                put(dst, Window(tx, ty, tw, th), rgb, alpha)
+                                if isinstance(rgb, tuple):        # tiles compressed by the worker
+                                    dst.write_tiles(*rgb)
+                                else:
+                                    put(dst, Window(tx, ty, tw, th), rgb, alpha)
                             else:
                                 put(ovr, Window(tx // 2, ty // 2, h_alpha.shape[1], h_alpha.shape[0]), h_rgb, h_alpha)
                         if which == "main":
@@ -1165,6 +1179,10 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                     pr_.join(timeout=5)
             if werr:
                 raise werr[0]
+            if own_writer:
+                tw0 = time.time()
+                dst.close()
+                t_write[0] += time.time() - tw0
             t_write = t_write[0]
             if gsrv is not None:
                 gs = gmon.stop()
