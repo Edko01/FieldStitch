@@ -36,7 +36,7 @@ def gpu_likely():
         ok = False
         try:
             import importlib.util
-            if importlib.util.find_spec("cupy") is not None and not os.environ.get("FIELDSTITCH_NO_GPU"):
+            if importlib.util.find_spec("cupy") is not None and not os.environ.get("PLANESITE_NO_GPU"):
                 from .sysinfo import gpus
                 ok = any("nvidia" in (g.get("name") or "").lower() for g in gpus())
         except Exception:
@@ -55,8 +55,10 @@ BYTES_PER_PX = {"jpeg": 0.33, "deflate": 1.9}
 
 
 def _calib_path():
+    from . import migrate_from_fieldstitch
+    migrate_from_fieldstitch()
     base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
-    d = os.path.join(base, "FieldStitch")
+    d = os.path.join(base, "PlaneSite")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "timing_calibration.json")
 

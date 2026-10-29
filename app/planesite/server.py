@@ -1,4 +1,4 @@
-"""Local web server for the FieldStitch user interface (binds to 127.0.0.1 only)."""
+"""Local web server for the PlaneSite user interface (binds to 127.0.0.1 only)."""
 import json
 import math
 import mimetypes
@@ -24,9 +24,22 @@ R0 = 64.0  # metres per screen pixel at zoom 0
 IS_WIN = sys.platform == "win32"
 
 
+def console_python():
+    """The console Python for worker processes, named PlaneSite.exe in the installed app so
+    Task Manager shows PlaneSite rather than python."""
+    d = os.path.dirname(sys.executable)
+    for n in ("PlaneSite.exe", "python.exe"):
+        p = os.path.join(d, n)
+        if IS_WIN and os.path.isfile(p):
+            return p
+    return sys.executable
+
+
 def config_dir():
+    from . import migrate_from_fieldstitch
+    migrate_from_fieldstitch()
     base = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
-    d = os.path.join(base, "FieldStitch")
+    d = os.path.join(base, "PlaneSite")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -35,7 +48,7 @@ def default_projects_dir():
     docs = os.path.join(os.path.expanduser("~"), "Documents")
     if not os.path.isdir(docs):
         docs = os.path.expanduser("~")
-    return os.path.join(docs, "FieldStitch Projects")
+    return os.path.join(docs, "PlaneSite Projects")
 
 
 class State:
@@ -214,7 +227,7 @@ def recent_projects():
 def open_project(d):
     d = os.path.normpath(d)
     if not os.path.exists(P.project_file(d)):
-        raise ApiError("No FieldStitch project in that folder.")
+        raise ApiError("No PlaneSite project in that folder.")
     with S.lock:
         if S.running():
             raise ApiError("Processing is running. Cancel it before switching projects.")
@@ -331,7 +344,7 @@ def open_geotiff(path):
                            "so it can't be measured or split. Reproject it first.")
         epsg = ds.crs.to_epsg()
         if not epsg:
-            raise ApiError("FieldStitch couldn't identify the GeoTIFF's coordinate system (needs an EPSG code).")
+            raise ApiError("PlaneSite couldn't identify the GeoTIFF's coordinate system (needs an EPSG code).")
         if ds.count < 3:
             raise ApiError("The GeoTIFF needs red, green and blue bands.")
         b = ds.bounds
@@ -467,7 +480,7 @@ def start_processing(settings):
         if not IS_WIN:
             kw["start_new_session"] = True
         try:
-            S.proc = subprocess.Popen([sys.executable, RUN_SCRIPT, S.dir], cwd=APP_DIR, stdout=logf,
+            S.proc = subprocess.Popen([console_python(), RUN_SCRIPT, S.dir], cwd=APP_DIR, stdout=logf,
                                       stderr=subprocess.STDOUT, creationflags=flags, **kw)
         finally:
             logf.close()  # the child has its own handle; keeping ours would lock the project folder
@@ -572,7 +585,7 @@ def save_diagnostics():
     import zipfile
     from .sysinfo import describe
     stamp = time.strftime("%Y%m%d-%H%M")
-    path = os.path.join(S.dir, "FieldStitch-diagnostics-%s-%s.zip" % (safe_name(S.proj["name"]), stamp))
+    path = os.path.join(S.dir, "PlaneSite-diagnostics-%s-%s.zip" % (safe_name(S.proj["name"]), stamp))
     rep = S.report() or {}
     rep = {k: v for k, v in rep.items() if k not in ("cam_positions", "center_lonlat")}
     summary = P.summarize(S.proj)
@@ -720,7 +733,7 @@ EMPTY_PNG = _empty_png()
 
 # -------------------------------------------------------------------- handler
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FieldStitch/" + __version__
+    server_version = "PlaneSite/" + __version__
 
     def log_message(self, fmt, *args):
         pass
@@ -1063,7 +1076,7 @@ def lifetime_watch(srv, browser):
         limit = 20 if browser is not None else 180
         if idle > limit:
             break
-    print("No window open and nothing running - closing FieldStitch.")
+    print("No window open and nothing running - closing PlaneSite.")
     os._exit(0)
 
 
@@ -1081,7 +1094,7 @@ def serve(port=8765, open_browser=True):
     srv.daemon_threads = True
     updater.PORT[0] = port
     url = "http://127.0.0.1:%d/" % port
-    print("FieldStitch %s is running at %s" % (__version__, url))
+    print("PlaneSite %s is running at %s" % (__version__, url))
     browser = None
     if open_browser:
         from .appwindow import open_window

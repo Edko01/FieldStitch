@@ -180,6 +180,21 @@ class _Atlas:
         self.dbase = xp.asarray(self.dbase_h)
         self.DF = xp.concatenate([D.ravel() for D in dpyr])
         # gradient magnitude / angle of gauss layers 1..N_LAYERS per octave
+        gsz = [N_LAYERS * r * c for r, c in zip(rows, cols)]
+        self.gbase_h = np.r_[0, np.cumsum(gsz)[:-1]].astype(np.int64)
+        self.gbase = xp.asarray(self.gbase_h)
+        if xp is not np and USE_CUDA_KERNELS[0]:
+            self.MAG = xp.empty(int(sum(gsz)), xp.float32)
+            self.ANG = xp.empty(int(sum(gsz)), xp.float32)
+            k = _kernel(xp, "grad")
+            for o, layers in enumerate(gpyr):
+                R, C = rows[o], cols[o]
+                for li in range(1, N_LAYERS + 1):
+                    a = int(self.gbase_h[o]) + (li - 1) * R * C
+                    G = xp.ascontiguousarray(layers[li], dtype=xp.float32)
+                    n = R * C
+                    k(((n + 255) // 256,), (256,), (G, np.int32(R), np.int32(C), self.MAG[a:a + n], self.ANG[a:a + n]))
+            return
         mags, angs = [], []
         for o, layers in enumerate(gpyr):
             G = xp.stack(layers[1:N_LAYERS + 1])
@@ -190,9 +205,6 @@ class _Atlas:
             mags.append(xp.sqrt(dx * dx + dy * dy).ravel())
             a = xp.degrees(xp.arctan2(dy, dx))
             angs.append(xp.where(a < 0, a + 360.0, a).ravel())
-        gsz = [N_LAYERS * r * c for r, c in zip(rows, cols)]
-        self.gbase_h = np.r_[0, np.cumsum(gsz)[:-1]].astype(np.int64)
-        self.gbase = xp.asarray(self.gbase_h)
         self.MAG = xp.concatenate(mags)
         self.ANG = xp.concatenate(angs)
 
@@ -220,9 +232,19 @@ def _derivs_flat(xp, DF, k, C, RC):
     return v, g, H, dxx, dyy, dxy
 
 
-def _extrema(xp, ndi, dpyr, contrast):
+def _extrema(xp, ndi, dpyr, contrast, A=None):
     """Flat DoG-atlas indices of 3x3x3 extrema in layers 1..N_LAYERS (one sync for all octaves)."""
     pthr = 0.8 * 0.5 * contrast / N_LAYERS
+    if xp is not np and USE_CUDA_KERNELS[0] and A is not None:
+        mask = xp.zeros(A.DF.size, xp.uint8)
+        k = _kernel(xp, "extrema")
+        for o in range(len(A.rows_h)):
+            R, C = int(A.rows_h[o]), int(A.cols_h[o])
+            n = N_LAYERS * (R - 2 * BORDER) * (C - 2 * BORDER)
+            if n > 0:
+                k(((n + 255) // 256,), (256,), (A.DF, np.int64(A.dbase_h[o]), np.int32(R), np.int32(C),
+                                                 np.float32(pthr), mask, np.int32(n)))
+        return xp.nonzero(mask)[0]
     masks = []
     for D in dpyr:
         rows, cols = D.shape[1:]
@@ -241,6 +263,8 @@ def _extrema(xp, ndi, dpyr, contrast):
 
 def _refine(xp, A, F, contrast, edge):
     """Sub-pixel refinement + contrast and edge tests for all candidates of all octaves at once."""
+    if xp is not np and USE_CUDA_KERNELS[0]:
+        return _refine_cuda(xp, A, F, contrast, edge)
     o = (xp.searchsorted(A.dbase, F, side="right") - 1).astype(xp.int64)
     R = A.rows[o]
     C = A.cols[o]
@@ -289,6 +313,14 @@ def _refine(xp, A, F, contrast, edge):
 
 def _orientations_flat(xp, A, o, li, r, c, scl, chunk=8192):
     """Dominant orientations for all keypoints (any octave/layer). Returns (kp index, angle)."""
+    if xp is not np and USE_CUDA_KERNELS[0]:
+        n = r.size
+        hist = xp.empty((n, ORI_BINS), xp.float32)
+        gofs = A.gbase[o] + (li - 1) * A.rows[o] * A.cols[o]
+        _kernel(xp, "ori")((n,), (128,), (A.MAG, A.ANG, gofs.astype(xp.int64), A.rows[o].astype(xp.int32),
+                                          A.cols[o].astype(xp.int32), r.astype(xp.int32), c.astype(xp.int32),
+                                          scl.astype(xp.float32), hist, np.int32(n)))
+        return _ori_peaks(xp, hist, 0)
     R = ORI_R_MAX
     off = xp.arange(-R, R + 1, dtype=xp.int64)
     oi, oj = xp.meshgrid(off, off, indexing="ij")
@@ -316,24 +348,30 @@ def _orientations_flat(xp, A, o, li, r, c, scl, chunk=8192):
         b = xp.rint(A.ANG[gi] * (ORI_BINS / 360.0)).astype(xp.int64) % ORI_BINS
         idx = (xp.arange(n, dtype=xp.int64)[:, None] * ORI_BINS + b).ravel()
         hist = _scatter_sum(xp, idx, m.ravel(), n * ORI_BINS).reshape(n, ORI_BINS)
-        h = (xp.roll(hist, 2, 1) + xp.roll(hist, -2, 1)) * (1.0 / 16) + \
-            (xp.roll(hist, 1, 1) + xp.roll(hist, -1, 1)) * (4.0 / 16) + hist * (6.0 / 16)
-        hmax = h.max(1, keepdims=True)
-        left = xp.roll(h, 1, 1)
-        right = xp.roll(h, -1, 1)
-        peak = (h > left) & (h > right) & (h >= ORI_PEAK * hmax) & (hmax > 0)
-        kp, j = xp.nonzero(peak)
-        hl, hc, hr = left[kp, j], h[kp, j], right[kp, j]
-        den = hl - 2 * hc + hr
-        den = xp.where(xp.abs(den) < 1e-12, -1e-12, den)
-        bin_ = j + 0.5 * (hl - hr) / den
-        bin_ = xp.where(bin_ < 0, bin_ + ORI_BINS, bin_)
-        bin_ = xp.where(bin_ >= ORI_BINS, bin_ - ORI_BINS, bin_)
-        angle = 360.0 - (360.0 / ORI_BINS) * bin_
-        angle = xp.where(xp.abs(angle - 360.0) < 1e-4, 0.0, angle)
-        kps.append(kp + s0)
-        angs.append(angle.astype(xp.float32))
+        kp, angle = _ori_peaks(xp, hist, s0)
+        kps.append(kp)
+        angs.append(angle)
     return xp.concatenate(kps), xp.concatenate(angs)
+
+
+def _ori_peaks(xp, hist, s0):
+    """Smooth 36-bin orientation histograms and return (kp index + s0, peak angle) pairs."""
+    h = (xp.roll(hist, 2, 1) + xp.roll(hist, -2, 1)) * (1.0 / 16) + \
+        (xp.roll(hist, 1, 1) + xp.roll(hist, -1, 1)) * (4.0 / 16) + hist * (6.0 / 16)
+    hmax = h.max(1, keepdims=True)
+    left = xp.roll(h, 1, 1)
+    right = xp.roll(h, -1, 1)
+    peak = (h > left) & (h > right) & (h >= ORI_PEAK * hmax) & (hmax > 0)
+    kp, j = xp.nonzero(peak)
+    hl, hc, hr = left[kp, j], h[kp, j], right[kp, j]
+    den = hl - 2 * hc + hr
+    den = xp.where(xp.abs(den) < 1e-12, -1e-12, den)
+    bin_ = j + 0.5 * (hl - hr) / den
+    bin_ = xp.where(bin_ < 0, bin_ + ORI_BINS, bin_)
+    bin_ = xp.where(bin_ >= ORI_BINS, bin_ - ORI_BINS, bin_)
+    angle = 360.0 - (360.0 / ORI_BINS) * bin_
+    angle = xp.where(xp.abs(angle - 360.0) < 1e-4, 0.0, angle)
+    return kp + s0, angle.astype(xp.float32)
 
 
 def detect(gray, gpu=False, max_kp=12000, contrast=0.015, edge=12.0, timings=None):
@@ -354,7 +392,7 @@ def detect(gray, gpu=False, max_kp=12000, contrast=0.015, edge=12.0, timings=Non
     t = lap("pyramid", t)
     A = _Atlas(xp, gpyr, dpyr)
     t = lap("atlas", t)
-    F = _extrema(xp, ndi, dpyr, contrast)
+    F = _extrema(xp, ndi, dpyr, contrast, A)
     t = lap("extrema", t)
     empty = {k: np.zeros(0, np.float32) for k in ("x", "y", "size", "angle", "response", "octave", "layer")}
     if F.size == 0:
@@ -497,10 +535,187 @@ extern "C" __global__ void sift_desc(const float* MAG, const float* ANG, const l
 _KERNELS = {}
 
 
+def _kernel(xp, name):
+    if name not in _KERNELS:
+        src, fn = {"desc": (_DESC_SRC, "sift_desc"), "grad": (_GRAD_SRC, "sift_grad"),
+                   "extrema": (_EXTREMA_SRC, "sift_extrema"), "refine": (_REFINE_SRC, "sift_refine"),
+                   "ori": (_ORI_SRC, "sift_ori")}[name]
+        # no fused multiply-add, so results follow the array version's rounding
+        _KERNELS[name] = xp.RawKernel(src, fn, options=("--fmad=false",))
+    return _KERNELS[name]
+
+
 def _desc_kernel(xp):
-    if "desc" not in _KERNELS:
-        _KERNELS["desc"] = xp.RawKernel(_DESC_SRC, "sift_desc")
-    return _KERNELS["desc"]
+    return _kernel(xp, "desc")
+
+
+_CONSTS = "#define N_LAYERS %d\n#define BORDER %d\n#define MAX_INTERP %d\n#define ORI_BINS %d\n" \
+          "#define ORI_RADIUS %.9ff\n#define ORI_SIG %.9ff\n#define ORI_R_MAX %d\n" \
+          % (N_LAYERS, BORDER, MAX_INTERP, ORI_BINS, ORI_RADIUS, ORI_SIG, ORI_R_MAX)
+
+_GRAD_SRC = _CONSTS + r"""
+extern "C" __global__ void sift_grad(const float* G, const int rows, const int cols, float* MAG, float* ANG)
+{
+    // gradient magnitude and angle (degrees, 0..360) of one gauss layer; zero on the 1-pixel border
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= rows * cols) return;
+    const int r = k / cols, c = k - (k / cols) * cols;
+    float dx = 0.f, dy = 0.f;
+    if (r > 0 && r < rows - 1 && c > 0 && c < cols - 1) {
+        dx = G[k + 1] - G[k - 1];
+        dy = G[k - cols] - G[k + cols];
+    }
+    MAG[k] = sqrtf(dx * dx + dy * dy);
+    float a = atan2f(dy, dx) * 57.29577951308232f;
+    ANG[k] = a < 0.f ? a + 360.f : a;
+}
+"""
+
+_EXTREMA_SRC = _CONSTS + r"""
+extern "C" __global__ void sift_extrema(const float* DF, const long long dbase, const int rows, const int cols,
+        const float pthr, unsigned char* mask, const int n)
+{
+    // one thread per interior voxel of DoG layers 1..N_LAYERS of one octave; marks 3x3x3 extrema
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    const int iw = cols - 2 * BORDER, ih = rows - 2 * BORDER;
+    const int l = t / (iw * ih) + 1;
+    const int rem = t - (l - 1) * (iw * ih);
+    const int r = rem / iw + BORDER;
+    const int c = rem - (rem / iw) * iw + BORDER;
+    const long long RC = (long long)rows * cols;
+    const long long k = dbase + l * RC + (long long)r * cols + c;
+    const float v = DF[k];
+    bool mx = v > pthr, mn = v < -pthr;
+    if (!mx && !mn) return;
+    for (int dl = -1; dl <= 1; dl++)
+        for (int dr = -1; dr <= 1; dr++)
+            for (int dc = -1; dc <= 1; dc++) {
+                const float u = DF[k + dl * RC + dr * cols + dc];
+                if (u > v) mx = false;
+                if (u < v) mn = false;
+            }
+    if (mx || mn) mask[k] = 1;
+}
+"""
+
+_REFINE_SRC = _CONSTS + r"""
+extern "C" __global__ void sift_refine(const float* DF, const long long* dbase, const long long* rows,
+        const long long* cols, const int n_oct, const long long* F, const int n, const float contrast,
+        const float edge, int* oo, int* ol, int* orr, int* oc, float* oX, float* oresp, unsigned char* ok)
+{
+    // one thread per candidate: sub-pixel fit (up to MAX_INTERP moves), then contrast and edge tests
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    ok[i] = 0;
+    const long long f = F[i];
+    int o = 0;
+    while (o + 1 < n_oct && f >= dbase[o + 1]) o++;
+    const long long base = dbase[o];
+    const int R = (int)rows[o], C = (int)cols[o];
+    const long long RC = (long long)R * C;
+    const long long loc = f - base;
+    int l = (int)(loc / RC);
+    const long long rem = loc - l * RC;
+    int r = (int)(rem / C);
+    int c = (int)(rem - (long long)r * C);
+    bool good = false;
+    float X0 = 0.f, X1 = 0.f, X2 = 0.f;
+    float v, dx, dy, ds, dxx, dyy, dss, dxy, dxs, dys;
+#define DERIVS() { \
+        const long long k = base + l * RC + (long long)r * C + c; \
+        v = DF[k]; \
+        const float xp1 = DF[k + 1], xm1 = DF[k - 1], yp1 = DF[k + C], ym1 = DF[k - C]; \
+        const float sp1 = DF[k + RC], sm1 = DF[k - RC]; \
+        dx = (xp1 - xm1) * 0.5f; dy = (yp1 - ym1) * 0.5f; ds = (sp1 - sm1) * 0.5f; \
+        dxx = xp1 + xm1 - 2.f * v; dyy = yp1 + ym1 - 2.f * v; dss = sp1 + sm1 - 2.f * v; \
+        dxy = (DF[k + C + 1] - DF[k + C - 1] - DF[k - C + 1] + DF[k - C - 1]) * 0.25f; \
+        dxs = (DF[k + RC + 1] - DF[k + RC - 1] - DF[k - RC + 1] + DF[k - RC - 1]) * 0.25f; \
+        dys = (DF[k + RC + C] - DF[k + RC - C] - DF[k - RC + C] + DF[k - RC - C]) * 0.25f; }
+    for (int it = 0; it < MAX_INTERP; it++) {
+        DERIVS();
+        // H = [[dxx dxy dxs] [dxy dyy dys] [dxs dys dss]], solve H x = -g by the adjugate
+        const float a = dxx, b = dxy, cc = dxs, d = dxy, e = dyy, ff = dys, g = dxs, h = dys, ii = dss;
+        const float A0 = e * ii - ff * h, B0 = -(d * ii - ff * g), C0 = d * h - e * g;
+        const float det = a * A0 + b * B0 + cc * C0;
+        if (!(fabsf(det) > 1e-20f)) break;
+        const float i00 = A0 / det, i01 = -(b * ii - cc * h) / det, i02 = (b * ff - cc * e) / det;
+        const float i10 = B0 / det, i11 = (a * ii - cc * g) / det, i12 = -(a * ff - cc * d) / det;
+        const float i20 = C0 / det, i21 = -(a * h - b * g) / det, i22 = (a * e - b * d) / det;
+        const float x0 = -((i00 * dx + i01 * dy) + i02 * ds);
+        const float x1 = -((i10 * dx + i11 * dy) + i12 * ds);
+        const float x2 = -((i20 * dx + i21 * dy) + i22 * ds);
+        if (fabsf(x0) < 0.5f && fabsf(x1) < 0.5f && fabsf(x2) < 0.5f) {
+            good = true; X0 = x0; X1 = x1; X2 = x2;
+            break;
+        }
+        if (!(fabsf(x0) <= 1e6f && fabsf(x1) <= 1e6f && fabsf(x2) <= 1e6f)) break;   // also NaN
+        c += (int)rintf(x0);
+        r += (int)rintf(x1);
+        l += (int)rintf(x2);
+        if (l < 1 || l > N_LAYERS || c < BORDER || c >= C - BORDER || r < BORDER || r >= R - BORDER) break;
+    }
+    if (!good) return;
+    DERIVS();
+    const float contr = v + 0.5f * ((dx * X0 + dy * X1) + ds * X2);
+    const float tr = dxx + dyy;
+    const float dt = dxx * dyy - dxy * dxy;
+    if (fabsf(contr) * N_LAYERS >= contrast && dt > 0.f && tr * tr * edge < (edge + 1.f) * (edge + 1.f) * dt) {
+        ok[i] = 1;
+        oo[i] = o; ol[i] = l; orr[i] = r; oc[i] = c;
+        oX[3 * i] = X0; oX[3 * i + 1] = X1; oX[3 * i + 2] = X2;
+        oresp[i] = fabsf(contr);
+    }
+#undef DERIVS
+}
+"""
+
+_ORI_SRC = _CONSTS + r"""
+extern "C" __global__ void sift_ori(const float* MAG, const float* ANG, const long long* gofs, const int* rows,
+        const int* cols, const int* kr, const int* kc, const float* scl, float* out, const int n)
+{
+    // one block per keypoint: gaussian-weighted 36-bin gradient orientation histogram (unsmoothed)
+    const int k = blockIdx.x;
+    if (k >= n) return;
+    __shared__ float hist[ORI_BINS];
+    for (int i = threadIdx.x; i < ORI_BINS; i += blockDim.x) hist[i] = 0.f;
+    __syncthreads();
+    const float sw = ORI_SIG * scl[k];
+        const int rad = (int)rintf(ORI_RADIUS * scl[k]);
+    const int R = rad < ORI_R_MAX ? rad : ORI_R_MAX;
+    const int W = 2 * R + 1;
+    const int nr = rows[k], nc = cols[k], pr = kr[k], pc = kc[k];
+    const long long base = gofs[k];
+    for (int s = threadIdx.x; s < W * W; s += blockDim.x) {
+        const int i = s / W - R;
+        const int j = s - (s / W) * W - R;
+        const int y = pr + i, x = pc + j;
+        if (y > 0 && y < nr - 1 && x > 0 && x < nc - 1) {
+            const long long gi = base + (long long)y * nc + x;
+            const float w = expf(-(float)(i * i + j * j) / (2.f * sw * sw));
+            int b = (int)rintf(ANG[gi] * (ORI_BINS / 360.f));
+            b = ((b % ORI_BINS) + ORI_BINS) % ORI_BINS;
+            atomicAdd(&hist[b], MAG[gi] * w);
+        }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < ORI_BINS; i += blockDim.x) out[(long long)k * ORI_BINS + i] = hist[i];
+}
+"""
+
+
+def _refine_cuda(xp, A, F, contrast, edge):
+    n = int(F.size)
+    oo, ol, orr, oc = (xp.empty(n, xp.int32) for _ in range(4))
+    X = xp.empty((n, 3), xp.float32)
+    resp = xp.empty(n, xp.float32)
+    ok = xp.empty(n, xp.uint8)
+    _kernel(xp, "refine")(((n + 127) // 128,), (128,),
+                          (A.DF, A.dbase, A.rows, A.cols, np.int32(len(A.rows_h)), F.astype(xp.int64), np.int32(n),
+                           np.float32(contrast), np.float32(edge), oo, ol, orr, oc, X, resp, ok))
+    s = xp.nonzero(ok)[0]
+    return (oo[s].astype(xp.int64), ol[s].astype(xp.int64), orr[s].astype(xp.int64), oc[s].astype(xp.int64),
+            X[s], resp[s])
 
 
 def _descr_cuda(xp, A, o, li, px, py, scl, ori, rad):

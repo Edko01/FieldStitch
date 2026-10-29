@@ -1,5 +1,8 @@
-FIELDSTITCH 1.5  -  offline orthomosaics from drone photos
+PLANESITE 1.6  -  offline orthomosaics from drone photos
 =========================================================
+
+PlaneSite was called FieldStitch before version 1.6. Installing it
+removes FieldStitch and keeps its settings.
 
 Builds a georeferenced orthomosaic (GeoTIFF) from a folder of nadir mapping
 photos, then lets you split it into fields, grid tiles or imported
@@ -12,9 +15,9 @@ also works with other DJI drones and most cameras that record GPS.
 
 STARTING
 --------
-Open FieldStitch from the Start menu or the desktop icon. It opens in its
+Open PlaneSite from the Start menu or the desktop icon. It opens in its
 own window. Close the window when you're done; if a job is still
-processing, it keeps running in the background and FieldStitch shows its
+processing, it keeps running in the background and PlaneSite shows its
 progress again the next time you open it.
 
 The first time you run the installer, Windows SmartScreen may say it
@@ -24,7 +27,7 @@ The first time you run the installer, Windows SmartScreen may say it
 
 WORKFLOW
 --------
-FieldStitch opens on the Projects page.
+PlaneSite opens on the Projects page.
 
 New project  Click New project, choose the flight's folder (subfolders are
            included; an SD card's DCIM folder works) or pick individual
@@ -69,7 +72,7 @@ Export     Export the whole orthomosaic and/or each area as its own
 
 Projects   The grid button at the top left lists your projects with a
            preview, starts a new one, and sets where new projects are
-           saved (Documents\FieldStitch Projects by default).
+           saved (Documents\PlaneSite Projects by default).
 
 
 OUTPUT FILES  (in the project's "outputs" folder)
@@ -101,7 +104,7 @@ GETTING THE BEST RESULT
 
 SPEED AND MEMORY
 ----------------
-  FieldStitch uses all CPU cores, and an NVIDIA graphics card (GeForce RTX,
+  PlaneSite uses all CPU cores, and an NVIDIA graphics card (GeForce RTX,
   Quadro/RTX A-series) when there is one: feature detection runs on the
   card while the CPU decodes photos. Other PCs process on the CPU only.
   The Processing options window shows the expected time for the job on
@@ -110,31 +113,33 @@ SPEED AND MEMORY
   1,000+ photo jobs; 32 GB is better. The project's "work" folder holds
   cached intermediate data; delete it after you are done to free space.
   Advanced > "Use the NVIDIA graphics card" turns the GPU off if needed.
+  In Task Manager, PlaneSite and its processing workers are listed as
+  "PlaneSite".
 
 
 UPDATES
 -------
   Click "Check for updates" (top right) while the PC is online.
   If a newer version exists you'll see what changed; click "Install
-  and restart". FieldStitch downloads the update, swaps it in and
+  and restart". PlaneSite downloads the update, swaps it in and
   reopens in a few seconds. Your projects and exports are not touched.
-  FieldStitch also checks quietly each time it opens; a yellow dot on
+  PlaneSite also checks quietly each time it opens; a yellow dot on
   the button means an update is waiting. Offline, nothing happens.
   Updates can't be installed while processing or exporting is running.
 
 
 TROUBLESHOOTING
 ---------------
-  * "Lost contact with FieldStitch": FieldStitch was closed. Open it again
+  * "Lost contact with PlaneSite": PlaneSite was closed. Open it again
     from the Start menu; projects are saved automatically.
   * The folder and file pickers open in a separate window; it may
-    appear behind FieldStitch (check the taskbar). You can also paste
+    appear behind PlaneSite (check the taskbar). You can also paste
     a folder path into the Import panel.
   * If processing stops with an error, click "Log" in the bottom bar.
     The full log is in the project folder as log.txt. The menu at the
     top right ("...") has "Save diagnostics", which bundles the log and
     timings into one file to send for support.
 
-To uninstall, use Settings -> Apps -> Installed apps -> FieldStitch.
-Your projects in Documents\FieldStitch Projects are kept. A program log
-is in %LOCALAPPDATA%\FieldStitch\logs if something goes wrong.
+To uninstall, use Settings -> Apps -> Installed apps -> PlaneSite.
+Your projects in Documents\PlaneSite Projects are kept. A program log
+is in %LOCALAPPDATA%\PlaneSite\logs if something goes wrong.

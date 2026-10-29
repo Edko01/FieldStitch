@@ -1,5 +1,5 @@
 "use strict";
-/* FieldStitch front end. Map frame: lat = northing offset (m), lng = easting offset (m) from the project origin. */
+/* PlaneSite front end. Map frame: lat = northing offset (m), lng = easting offset (m) from the project origin. */
 
 const $ = (id) => document.getElementById(id);
 const R0 = 64;
@@ -89,7 +89,7 @@ async function refresh() {
   try {
     status = await api("/api/status");
   } catch (e) {
-    if (!updRestarting) toast("Lost contact with FieldStitch. Start it again from the Start menu or desktop icon.");
+    if (!updRestarting) toast("Lost contact with PlaneSite. Start it again from the Start menu or desktop icon.");
     schedule(4000);
     return;
   }
@@ -1107,7 +1107,7 @@ function wire() {
   $("npParent").onchange = npSuggest;
   $("npBrowse").onclick = async () => { const p = await browse("folder", "Save the new project in", $("npParent").value); if (p) { $("npParent").value = p; npSuggest(); } };
   $("newForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); npCreate(); } };
-  $("dOpen").onclick = async () => { const p = await browse("folder", "Choose a FieldStitch project folder", $("dLoc").textContent); if (p) openProject(p); };
+  $("dOpen").onclick = async () => { const p = await browse("folder", "Choose a PlaneSite project folder", $("dLoc").textContent); if (p) openProject(p); };
   $("dLocChange").onclick = async () => {
     const p = await browse("folder", "Save new projects in", $("dLoc").textContent);
     if (!p) return;
@@ -1173,9 +1173,9 @@ async function pollUpdate() {
     }
     if (u.phase === "downloading") { $("updMsg").textContent = "Downloading update…"; $("updBar").style.width = Math.round((u.frac || 0) * 100) + "%"; }
     if (u.phase === "installing") { $("updMsg").textContent = "Installing…"; $("updBar").style.width = "100%"; }
-    if (u.phase === "restarting") $("updMsg").textContent = "Restarting FieldStitch…";
+    if (u.phase === "restarting") $("updMsg").textContent = "Restarting PlaneSite…";
   } else if (!st) {
-    $("updMsg").textContent = "Restarting FieldStitch…";
+    $("updMsg").textContent = "Restarting PlaneSite…";
   }
   setTimeout(pollUpdate, 1000);
 }

@@ -172,7 +172,24 @@ def cpu_worker_main(task_q, res_q):
 
 # --------------------------------------------------------------------------------- GPU
 def gpu_selftest():
-    """Run gsift on a small test image on the GPU and on the CPU; they must agree."""
+    """Run gsift on a small test image on the GPU and on the CPU; they must agree. If the hand-written
+    CUDA kernels disagree on this card, retry with plain GPU array code before giving up on the GPU.
+    Returns a note for the log ("" when the kernels are in use)."""
+    from . import gsift
+    if gsift.USE_CUDA_KERNELS[0]:
+        try:
+            _gpu_selftest()
+            return ""
+        except Exception as e:  # noqa
+            gsift.USE_CUDA_KERNELS[0] = False
+            gsift._KERNELS.clear()
+            _gpu_selftest()
+            return "; CUDA kernels off (%s: %s)" % (type(e).__name__, str(e)[:120])
+    _gpu_selftest()
+    return ""
+
+
+def _gpu_selftest():
     from . import gsift
     import cupy as cp
     rng = np.random.default_rng(7)
@@ -265,12 +282,12 @@ def gpu_worker_main(task_q, res_q, n_threads, wid):
     try:
         t0 = time.perf_counter()
         info = gpu_info()
-        gpu_selftest()
+        note = gpu_selftest()
         gpu_ok = True
         from .sysinfo import raise_priority
         raise_priority()
-        res_q.put(("gpu", wid, "%s (%.1f GB, compute %s), ready in %.0f s"
-                   % (info["name"], info["mem_gb"], info["cc"], time.perf_counter() - t0)))
+        res_q.put(("gpu", wid, "%s (%.1f GB, compute %s), ready in %.0f s%s"
+                   % (info["name"], info["mem_gb"], info["cc"], time.perf_counter() - t0, note)))
         if wid == 0:
             try:
                 res_q.put(("gpu", wid, gpu_benchmark()))

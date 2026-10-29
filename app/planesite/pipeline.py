@@ -270,7 +270,7 @@ def _run(project_dir, prog):
         os.makedirs(d, exist_ok=True)
     t_start = time.time()
     T = Timer()
-    log("FieldStitch %s - project '%s'" % (__version__, proj.get("name")))
+    log("PlaneSite %s - project '%s'" % (__version__, proj.get("name")))
     log("Preset: %s | RAM %.1f GB | CPUs %d" % (settings["preset"], total_ram_bytes() / 1e9, os.cpu_count() or 1))
     from .sysinfo import describe
     sysd = describe(project_dir, proj.get("folders") or [])
@@ -475,7 +475,7 @@ def _run(project_dir, prog):
 
     ctx = {"feat_dir": feat_dir, "W": W, "H": H, "K": [Kmat(i) for i in range(n)],
            "dist": [dist_of(i) for i in range(n)], "R": R_gimbal, "C": Cgps, "zg": zg,
-           "has_rot": has_gimbal.copy(), "prior_tol": float(os.environ.get("FIELDSTITCH_PRIOR_TOL", "0.18")), "ransac_thr": max(1.0, 0.6 * reduce),
+           "has_rot": has_gimbal.copy(), "prior_tol": float(os.environ.get("PLANESITE_PRIOR_TOL", "0.18")), "ransac_thr": max(1.0, 0.6 * reduce),
            "min_inliers": 20, "ratio": 0.8, "checks": 48, "use_prior": True,
            "guided": True, "n_coarse": 1000, "guided_radius": 0.03, "guided_k": 16}
     ctx_file = os.path.join(work, "match_ctx.pkl")
@@ -535,6 +535,8 @@ def _run(project_dir, prog):
             done += 1
             if isinstance(sim, tuple) and len(sim) == 2 and sim[0] == "error":
                 errors += 1
+                if errors <= 3:
+                    log("Matching error on photos %d-%d: %s" % (i, j, sim[1][:300]))
                 sim = None
             if q is not None:
                 match_res.append((i, j, q, t))
@@ -859,9 +861,9 @@ def surface_points(rec, tid, img, uv, nt, sigma_px, nthreads):
 
 
 def gpu_wanted(settings):
-    if str(settings.get("gpu", "auto")).lower() in ("off", "false", "0", "no") or os.environ.get("FIELDSTITCH_NO_GPU"):
+    if str(settings.get("gpu", "auto")).lower() in ("off", "false", "0", "no") or os.environ.get("PLANESITE_NO_GPU"):
         return False
-    if os.environ.get("FIELDSTITCH_FORCE_GPU_WORKERS"):
+    if os.environ.get("PLANESITE_FORCE_GPU_WORKERS"):
         return True   # tests: exercise the GPU workers (and their CPU fallback) without an NVIDIA card
     from .estimate import gpu_likely
     return gpu_likely()
@@ -872,10 +874,10 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
     from one queue. GPU and CPU produce identical SIFT features, so photos can go to either."""
     import queue as _queue
     from .features import cpu_worker_main, gpu_worker_main
-    n_gpu = int(os.environ.get("FIELDSTITCH_GPU_PROCS", "2"))
+    n_gpu = int(os.environ.get("PLANESITE_GPU_PROCS", "2"))
     # the CPU keeps every worker it would have without a GPU; the GPU workers add to that
     # (their few decode threads mostly wait on the card)
-    threads = int(os.environ.get("FIELDSTITCH_GPU_THREADS", "3"))
+    threads = int(os.environ.get("PLANESITE_GPU_THREADS", "3"))
     # one core per GPU worker is left free so the processes feeding the card are never starved
     n_cpu = max(1, nworkers - 2 * n_gpu)
     ctxm = mp.get_context("spawn")
@@ -995,8 +997,8 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
     # GPU rendering is experimental: it ran at ~10% GPU load and cost CPU workers in tests, so it
-    # is off unless FIELDSTITCH_GPU_RENDER=1
-    n_gpu_r = 1 if (os.environ.get("FIELDSTITCH_GPU_RENDER") == "1" and gpu_wanted(settings) and len(groups) >= 8) else 0
+    # is off unless PLANESITE_GPU_RENDER=1
+    n_gpu_r = 1 if (os.environ.get("PLANESITE_GPU_RENDER") == "1" and gpu_wanted(settings) and len(groups) >= 8) else 0
     gpu_threads = 8
     if n_gpu_r:
         # the GPU worker's decode threads need CPU time too
@@ -1126,7 +1128,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             prog.set("ortho", 0.9, "Building overviews", force=True)
             # The half-resolution copy written alongside becomes the external overview file
             # (<name>.tif.ovr); its own overviews provide the coarser levels. GDAL, QGIS, ArcGIS
-            # and FieldStitch pick it up automatically.
+            # and PlaneSite pick it up automatically.
             facs = []
             f = 2
             while max(hw, hh) / f >= 256:

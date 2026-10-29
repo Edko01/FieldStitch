@@ -18,7 +18,7 @@ from .geo import rodrigues_batch, rotvec_batch
 NI = 8  # intrinsics per group
 
 _POOL = []
-PCG_RTOL = float(os.environ.get("FIELDSTITCH_PCG_RTOL", "1e-2"))  # inexact LM steps are fine
+PCG_RTOL = float(os.environ.get("PLANESITE_PCG_RTOL", "1e-2"))  # inexact LM steps are fine
 
 
 def _pmap(fn, items):
@@ -359,7 +359,7 @@ class BundleAdjuster:
     @staticmethod
     def _linsolve(S, rhs, N):
         n = S.shape[0]
-        if n <= int(os.environ.get("FIELDSTITCH_DENSE_MAX", "4200")):
+        if n <= int(os.environ.get("PLANESITE_DENSE_MAX", "4200")):
             try:
                 import scipy.linalg as sla
                 c = sla.cho_factor(S.toarray(), check_finite=False)

@@ -397,7 +397,7 @@ def render_group(group):
     x1 = max(t[0] + t[2] for t in group)
     y1 = max(t[1] + t[3] for t in group)
     res = render_region((x0, y0, x1 - x0, y1 - y0), group)
-    if os.environ.get("FIELDSTITCH_TEST_DIE"):
+    if os.environ.get("PLANESITE_TEST_DIE"):
         os._exit(3)  # test hook: simulate a worker being killed
     _T["total"] += time.perf_counter() - t0
     snap = dict(_T)

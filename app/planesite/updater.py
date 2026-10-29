@@ -1,8 +1,8 @@
-"""Check GitHub for a newer FieldStitch and install it in place.
+"""Check GitHub for a newer PlaneSite and install it in place.
 
 Updates are published in the repo itself (github.com/<UPDATE_REPO>, branch main):
   updates/latest.json   {"version", "runtime", "app_zip", "sha256", "notes", "full_url"}
-  updates/fieldstitch-app-<ver>.zip   the new "app" folder
+  updates/planesite-app-<ver>.zip   the new "app" folder
 They are read from raw.githubusercontent.com, so no GitHub account or token is needed.
 """
 import hashlib
@@ -38,7 +38,7 @@ def vtuple(v):
 
 
 def installed_runtime():
-    p = os.path.join(ROOT_DIR, "python", "fieldstitch_runtime.txt")
+    p = os.path.join(ROOT_DIR, "python", "planesite_runtime.txt")
     try:
         with open(p) as f:
             return int(f.read().strip())
@@ -47,7 +47,7 @@ def installed_runtime():
 
 
 def _get(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": "FieldStitch/" + __version__,
+    req = urllib.request.Request(url, headers={"User-Agent": "PlaneSite/" + __version__,
                                                "Accept": "application/vnd.github+json"})
     if url.startswith("http://127.0.0.1"):
         return urllib.request.urlopen(req, timeout=timeout)  # local test server only
@@ -56,7 +56,7 @@ def _get(url, timeout=20):
 
 
 def _raw_base():
-    return os.environ.get("FIELDSTITCH_UPDATE_RAW",
+    return os.environ.get("PLANESITE_UPDATE_RAW",
                           "https://raw.githubusercontent.com/%s/main" % UPDATE_REPO).rstrip("/")
 
 
@@ -98,7 +98,7 @@ def install(busy_reason=None):
     if not info.get("ok"):
         raise RuntimeError(info.get("message"))
     if not info.get("available"):
-        raise RuntimeError("FieldStitch is already up to date.")
+        raise RuntimeError("PlaneSite is already up to date.")
     if info.get("needs_full"):
         raise RuntimeError("This update needs the full download. Use the download link instead.")
     state.clear()
@@ -136,7 +136,7 @@ def _install_worker(info):
         # the zip contains a top-level "app" folder
         src = os.path.join(UPDATE_DIR, "app")
         if not (os.path.isfile(os.path.join(src, "main.py"))
-                and os.path.isfile(os.path.join(src, "fieldstitch", "__init__.py"))):
+                and os.path.isfile(os.path.join(src, "planesite", "__init__.py"))):
             raise RuntimeError("The update package is incomplete.")
         os.replace(src, new_dir)
         swap = os.path.join(UPDATE_DIR, "swap.py")
@@ -182,8 +182,11 @@ for attempt in range(60):
         say("waiting for files to be released: %s" % e)
         time.sleep(1.0)
 say("swap " + ("done" if ok else "FAILED, kept the previous version"))
-pyw = os.path.join(root, "python", "pythonw.exe")
-py = pyw if os.path.exists(pyw) else sys.executable
+py = sys.executable
+for n in ("PlaneSiteW.exe", "pythonw.exe"):
+    if os.path.exists(os.path.join(root, "python", n)):
+        py = os.path.join(root, "python", n)
+        break
 cmd = [py, os.path.join(root, "app", "main.py"), "--no-window"]
 
 def alive(port):

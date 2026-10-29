@@ -1,8 +1,8 @@
 {
- "version": "1.5.5",
- "runtime": 2,
- "app_zip": "updates/fieldstitch-app-1.5.5.zip",
- "sha256": "9dea7cab6ff30ee5d3d4e53e7fd68fdc8831126cfbe912d93138778fe0914efe",
- "notes": "FieldStitch 1.5.5 - faster feature detection on the graphics card:\n- The descriptor step (about three quarters of the card's time per photo in 1.5.4) now runs as a dedicated GPU kernel, the way GPU versions of this detector normally do it. The card's results are still checked against the CPU before each job.\n- Rendering on the graphics card is switched off again: in 1.5.4 it kept the card only about 10% busy and took workers away from the CPU, so the job was slower overall.",
+ "version": "1.6.0",
+ "runtime": 3,
+ "app_zip": "updates/planesite-app-1.6.0.zip",
+ "sha256": "6c43e1d15f7336a39d456a685e585a74a3e13b4ee4967ccb6169434bf53a4dee",
+ "notes": "PlaneSite 1.6.0 - FieldStitch is now PlaneSite:\n- New name and logo. Windows Task Manager now lists the app and its processing workers as PlaneSite instead of python.\n- Faster feature detection on the graphics card: finding, refining and orienting keypoints now run as dedicated GPU kernels, like the descriptors in 1.5.5. Results are identical to the previous version, and the card is still checked against the CPU before each job.\n- This version needs the full installer (PlaneSite-Setup-1.6.0.exe). It removes FieldStitch, keeps your settings and speed calibration, and installs PlaneSite in its place. Old FieldStitch projects are not moved.",
  "date": "2026-10-28"
 }

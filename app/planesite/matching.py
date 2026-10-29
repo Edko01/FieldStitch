@@ -240,4 +240,6 @@ def match_pair(task):
         sim = _similarity(c, i, ui, uj, q, t)
         return i, j, q.astype(np.int32), t.astype(np.int32), sim, n_in
     except Exception as e:  # noqa
-        return i, j, None, None, ("error", str(e)), 0
+        import traceback
+        tb = traceback.extract_tb(e.__traceback__)[-1]
+        return i, j, None, None, ("error", "%s: %s (%s line %d)" % (type(e).__name__, e, os.path.basename(tb.filename), tb.lineno)), 0

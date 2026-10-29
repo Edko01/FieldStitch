@@ -1,4 +1,4 @@
-"""Open FieldStitch in its own app window (Microsoft Edge / Chrome app mode), and find a running instance."""
+"""Open PlaneSite in its own app window (Microsoft Edge / Chrome app mode), and find a running instance."""
 import json
 import os
 import subprocess
@@ -11,18 +11,18 @@ PORTS = range(8765, 8795)
 
 def data_dir():
     base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    d = os.path.join(base, "FieldStitch")
+    d = os.path.join(base, "PlaneSite")
     os.makedirs(d, exist_ok=True)
     return d
 
 
 def find_running():
-    """URL of an already running FieldStitch server, or None."""
+    """URL of an already running PlaneSite server, or None."""
     for p in PORTS:
         url = "http://127.0.0.1:%d/" % p
         try:
             with urllib.request.urlopen(url + "api/status", timeout=0.4) as r:
-                if "FieldStitch" in (r.headers.get("Server") or ""):
+                if "PlaneSite" in (r.headers.get("Server") or ""):
                     json.loads(r.read().decode("utf-8"))
                     return url
         except Exception:

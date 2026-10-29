@@ -208,12 +208,12 @@ def camera_key(m):
                                       m.get("focal_mm") or 0, m.get("source", ""))
 
 
-SKIP_DIRS = {"fieldstitch", "_fieldstitch", "work", "thumbs", "outputs", "exports", "$recycle.bin",
+SKIP_DIRS = {"planesite", "_planesite", "fieldstitch", "_fieldstitch", "work", "thumbs", "outputs", "exports", "$recycle.bin",
              "system volume information"}
 
 
 def _is_project_dir(path):
-    """FieldStitch (or other processing) project folders hold derived images, not flight photos."""
+    """PlaneSite (or other processing) project folders hold derived images, not flight photos."""
     return (os.path.isfile(os.path.join(path, "project.json"))
             or os.path.isdir(os.path.join(path, "work", "thumbs")))
 
