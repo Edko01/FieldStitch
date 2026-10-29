@@ -475,7 +475,9 @@ def start_processing(settings):
         prog = os.path.join(S.dir, "progress.json")
         save_json(prog, {"status": "starting", "stage": "", "overall": 0, "message": "Starting", "elapsed": 0})
         logf = open(os.path.join(S.dir, "process_console.txt"), "w")
-        flags = 0x08000000 if IS_WIN else 0
+        # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: the workers inherit below-normal priority,
+        # so they still get every idle core but the desktop and the PlaneSite window come first
+        flags = (0x08000000 | 0x00004000) if IS_WIN else 0
         kw = {}
         if not IS_WIN:
             kw["start_new_session"] = True
@@ -696,6 +698,13 @@ def save_diagnostics():
             fp = os.path.join(S.dir, name)
             if os.path.exists(fp):
                 z.write(fp, name)
+        try:      # the app's own log (window freezes, server errors), last part only
+            from .appwindow import data_dir
+            lp = os.path.join(data_dir(), "logs", "planesite.log")
+            with open(lp, "r", encoding="utf-8", errors="replace") as f:
+                z.writestr("planesite.log", "".join(f.readlines()[-1500:]))
+        except Exception:
+            pass
         z.writestr("report.json", json.dumps(rep, indent=1))
         z.writestr("info.json", json.dumps(info, indent=1, default=str))
     return path
@@ -1107,6 +1116,16 @@ class Handler(BaseHTTPRequestHandler):
     def api_post(self, path, b):
         if path == "/api/browse":
             return {"path": browse(b.get("mode", "folder"), b.get("title", "Select"), b.get("initial", ""))}
+        if path == "/api/clientlog":
+            msg = str(b.get("msg", ""))[:2000]
+            print("window: %s" % msg)
+            if S.dir and S.running():
+                try:
+                    with open(os.path.join(S.dir, "log.txt"), "a", encoding="utf-8") as f:
+                        f.write("[%s] window: %s\n" % (time.strftime("%H:%M:%S"), msg[:500]))
+                except OSError:
+                    pass
+            return {}
         if path == "/api/quit":
             if S.dir and S.running():
                 if not b.get("force"):
@@ -1290,11 +1309,33 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError("Unknown request")
 
 
+def _window_trace(browser, state):
+    """Note in the log when an open window stops asking for updates (it polls every 1-3 s) and
+    when it starts again, so a frozen window leaves a trace."""
+    if not S.last_seen or (browser is not None and browser.poll() is not None):
+        return
+    idle = time.time() - S.last_seen
+    if idle > 15 and not state.get("quiet"):
+        state["quiet"] = S.last_seen
+        pr = progress_state() or {}
+        print("%s window stopped checking in at %s (processing: %s, %s)" % (
+            time.strftime("%H:%M:%S"), time.strftime("%H:%M:%S", time.localtime(S.last_seen)),
+            bool(S.dir and S.running()), pr.get("message", "")))
+    elif idle < 5 and state.get("quiet"):
+        print("%s window responding again after %.0f s" % (time.strftime("%H:%M:%S"), time.time() - state["quiet"]))
+        state["quiet"] = 0
+
+
 def lifetime_watch(srv, browser):
     """Quit when the app window is gone and nothing is running."""
     started = time.time()
+    trace = {}
     while True:
         time.sleep(5)
+        try:
+            _window_trace(browser, trace)
+        except Exception:
+            pass
         busy = (S.dir and S.running()) or (S.scan and not S.scan.get("finished")) \
             or (S.export and not S.export.get("finished")) \
             or updater.state.get("phase") in ("downloading", "installing", "restarting")
