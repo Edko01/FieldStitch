@@ -667,22 +667,81 @@ def export_estimate(b):
 
 
 # ---------------------------------------------------------------------- tiles
-def tile_png(z, x, y):
-    import cv2
+os.environ.setdefault("GDAL_CACHEMAX", "512")   # MB of decoded GeoTIFF blocks shared by tile requests
+TILE_CACHE_BYTES = 384 * 1024 * 1024
+
+
+class _TileCache:
+    """Finished map tiles (encoded bytes) for the open orthomosaic, least recently used dropped first."""
+
+    def __init__(self):
+        from collections import OrderedDict
+        self.lock = threading.Lock()
+        self.items = OrderedDict()
+        self.bytes = 0
+        self.key = None          # (path, mtime) the cached tiles belong to
+
+    def get(self, key):
+        with self.lock:
+            v = self.items.get(key)
+            if v is not None:
+                self.items.move_to_end(key)
+            return v
+
+    def put(self, key, value):
+        with self.lock:
+            if key in self.items:
+                return
+            self.items[key] = value
+            self.bytes += len(value[0]) + 64
+            while self.bytes > TILE_CACHE_BYTES and self.items:
+                _, old = self.items.popitem(last=False)
+                self.bytes -= len(old[0]) + 64
+
+    def reset(self, key):
+        with self.lock:
+            if self.key != key:
+                self.items.clear()
+                self.bytes = 0
+                self.key = key
+
+
+TILES = _TileCache()
+
+
+def _tile_dataset(path, mt):
     import rasterio
-    from rasterio.enums import Resampling
-    from rasterio.windows import Window
-    path = S.ortho_path()
-    if not path or not S.origin:
-        return None
     loc = S.tile_local
-    mt = os.path.getmtime(path)
     if getattr(loc, "path", None) != path or getattr(loc, "mtime", None) != mt:
         if getattr(loc, "ds", None) is not None:
             loc.ds.close()
         loc.ds = rasterio.open(path)
         loc.path, loc.mtime = path, mt
-    ds = loc.ds
+    return loc.ds
+
+
+def tile_png(z, x, y):
+    """Encoded map tile (bytes, content type) or None when the tile is empty. Fully covered tiles
+    are JPEG (small and quick to make), tiles on the edge of the mosaic PNG with transparency."""
+    path = S.ortho_path()
+    if not path or not S.origin:
+        return None
+    mt = os.path.getmtime(path)
+    TILES.reset((path, mt))
+    key = (path, mt, z, x, y)
+    hit = TILES.get(key)
+    if hit is not None:
+        return hit if hit[0] else None
+    res = _make_tile(path, mt, z, x, y)
+    TILES.put(key, res or (b"", ""))
+    return res
+
+
+def _make_tile(path, mt, z, x, y):
+    import cv2
+    from rasterio.enums import Resampling
+    from rasterio.windows import Window
+    ds = _tile_dataset(path, mt)
     _, e0, n0 = S.origin
     s = R0 / (2 ** z)
     te0 = e0 + x * 256 * s
@@ -708,15 +767,55 @@ def tile_png(z, x, y):
     win = Window(col0, row0, (ie1 - ie0) / gsd, (in1 - in0) / gsd)
     rgb = ds.read([1, 2, 3], window=win, out_shape=(3, h, w), resampling=Resampling.bilinear)
     m = ds.read_masks(1, window=win, out_shape=(h, w), resampling=Resampling.nearest)
+    if not m.any():
+        return None
+    if w == 256 and h == 256 and m.min() == 255:
+        bgr = cv2.merge([rgb[2], rgb[1], rgb[0]])
+        ok, enc = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        return enc.tobytes(), "image/jpeg"
     tile = np.zeros((256, 256, 4), np.uint8)
     tile[dy0:dy1, dx0:dx1, 0] = rgb[2]
     tile[dy0:dy1, dx0:dx1, 1] = rgb[1]
     tile[dy0:dy1, dx0:dx1, 2] = rgb[0]
     tile[dy0:dy1, dx0:dx1, 3] = m
-    if not tile[..., 3].any():
-        return None
     ok, enc = cv2.imencode(".png", tile, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-    return enc.tobytes()
+    return enc.tobytes(), "image/png"
+
+
+_WARM = {"key": None}
+
+
+def warm_tiles(bounds_local, maxz):
+    """Build the zoomed-out tile levels in the background as soon as an orthomosaic is shown, so
+    zooming and panning at overview scales never waits on the GeoTIFF. Stops if the ortho changes."""
+    path = S.ortho_path()
+    if not path or not S.origin:
+        return
+    mt = os.path.getmtime(path)
+    key = (path, mt)
+    if _WARM["key"] == key:
+        return
+    _WARM["key"] = key
+    l, bot, r, top = bounds_local
+    jobs = []
+    for z in range(0, maxz + 1):
+        s = R0 / (2 ** z) * 256
+        xs = range(int(math.floor(l / s)), int(math.floor(r / s)) + 1)
+        ys = range(int(math.floor(-top / s)), int(math.floor(-bot / s)) + 1)
+        if len(xs) * len(ys) > 2500 or len(jobs) + len(xs) * len(ys) > 4000:
+            break
+        jobs += [(z, x, y) for y in ys for x in xs]
+
+    def run(part):
+        for z, x, y in part:
+            if _WARM["key"] != key or S.ortho_path() != path:
+                return
+            try:
+                tile_png(z, x, y)
+            except Exception:
+                return
+    for k in range(2):
+        threading.Thread(target=run, args=(jobs[k::2],), daemon=True).start()
 
 
 def _empty_png():
@@ -734,6 +833,8 @@ EMPTY_PNG = _empty_png()
 # -------------------------------------------------------------------- handler
 class Handler(BaseHTTPRequestHandler):
     server_version = "PlaneSite/" + __version__
+    protocol_version = "HTTP/1.1"     # keep connections open: the map loads many tiles in a row
+    disable_nagle_algorithm = True    # else each kept-alive response waits ~40 ms for a delayed ACK
 
     def log_message(self, fmt, *args):
         pass
@@ -764,8 +865,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.api_get(path, q))
             m = re.match(r"^/tiles/(\d+)/(-?\d+)/(-?\d+)\.png$", path)
             if m:
-                data = tile_png(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-                return self._send(200, data or EMPTY_PNG, "image/png")
+                res = tile_png(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                data, ctype = res or (EMPTY_PNG, "image/png")
+                # the URL carries the ortho's modification time, so a tile never changes
+                return self._send(200, data, ctype, {"Cache-Control": "max-age=31536000, immutable"})
             if path == "/thumb":
                 d = (q.get("dir") or [""])[0]
                 ok = any(os.path.normcase(d) == os.path.normcase(r) for r in S.cfg.get("recent", []))
@@ -855,6 +958,7 @@ class Handler(BaseHTTPRequestHandler):
             maxz = int(math.ceil(math.log2(R0 / gsd)))
             rep = dict(rep)
             cams = rep.pop("cam_positions", [])
+            warm_tiles((b.left - e0, b.bottom - n0, b.right - e0, b.top - n0), maxz)
             return {"ready": True, "report": rep, "ortho_path": op, "outputs_dir": S.outputs(),
                     "bounds": [b.left - e0, b.bottom - n0, b.right - e0, b.top - n0], "max_native_zoom": maxz,
                     "cams": [[round(c[0] - e0, 2), round(c[1] - n0, 2)] for c in cams],

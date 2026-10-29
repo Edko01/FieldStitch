@@ -741,9 +741,11 @@ def _run(project_dir, prog):
             thumbs = list(ex.map(load_thumb, cams))
         from .ortho import compute_gains
         spacing = max(2.0, float(np.median([2 * hs for hs in half_short[ia]])) / 14.0)
-        gains = compute_gains(cams, thumbs, dsm, (ox0, oy0, ox1, oy1), spacing, log)
+        gains, view = compute_gains(cams, thumbs, dsm, (ox0, oy0, ox1, oy1), spacing, log)
+        view = view.tolist()
         for c, gn in zip(cams, gains):
             c["gain"] = tuple(float(x) for x in gn)
+            c["view"] = view   # shared viewing-angle correction (sun angle, vignetting) per channel
         del thumbs
 
     # save reconstruction
@@ -860,6 +862,11 @@ def surface_points(rec, tid, img, uv, nt, sigma_px, nthreads):
     return np.concatenate(parts) if parts else np.zeros((0, 3))
 
 
+def _cupy_installed():
+    import importlib.util
+    return importlib.util.find_spec("cupy") is not None
+
+
 def gpu_wanted(settings):
     if str(settings.get("gpu", "auto")).lower() in ("off", "false", "0", "no") or os.environ.get("PLANESITE_NO_GPU"):
         return False
@@ -874,7 +881,9 @@ def run_features_hybrid(tasks, nworkers, on_result, log):
     from one queue. GPU and CPU produce identical SIFT features, so photos can go to either."""
     import queue as _queue
     from .features import cpu_worker_main, gpu_worker_main
-    n_gpu = int(os.environ.get("PLANESITE_GPU_PROCS", "2"))
+    # each GPU worker drives the card from one Python thread, so several are needed to keep a
+    # fast card busy (1.6.0: two workers kept an RTX 4070 only ~45% busy)
+    n_gpu = int(os.environ.get("PLANESITE_GPU_PROCS", "3" if nworkers >= 16 else "2"))
     # the CPU keeps every worker it would have without a GPU; the GPU workers add to that
     # (their few decode threads mostly wait on the card)
     threads = int(os.environ.get("PLANESITE_GPU_THREADS", "3"))
@@ -996,15 +1005,17 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     ctx_file = os.path.join(work, "render_ctx.pkl")
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
-    # GPU rendering is experimental: it ran at ~10% GPU load and cost CPU workers in tests, so it
-    # is off unless PLANESITE_GPU_RENDER=1
-    n_gpu_r = 1 if (os.environ.get("PLANESITE_GPU_RENDER") == "1" and gpu_wanted(settings) and len(groups) >= 8) else 0
-    gpu_threads = 8
-    if n_gpu_r:
-        # the GPU worker's decode threads need CPU time too
-        nworkers = max(1, nworkers - 4)
-    log("Rendering %d tiles with %d workers%s (photo decode 1/%d)"
-        % (len(tiles), nworkers, " + 1 GPU worker" if n_gpu_r else "", reduce))
+    # GPU rendering: the card blends blocks that the CPU workers plan and decode (gpurender.py).
+    # The CPU workers keep rendering whatever the card has no room for.
+    use_gpu_r = (gpu_wanted(settings) and len(groups) >= 8 and not os.environ.get("PLANESITE_NO_GPU_RENDER")
+                 and (os.environ.get("PLANESITE_GPU_EMULATE") or _cupy_installed()))
+    gpu_threads = int(os.environ.get("PLANESITE_GPU_RENDER_THREADS", "2"))
+    if use_gpu_r and nworkers > 4:
+        nworkers -= 1     # the GPU process copies data and launches work on the CPU too
+    from .jpegcrop import available as _tj_ok
+    log("Rendering %d tiles with %d workers%s (photo decode 1/%d, %s)"
+        % (len(tiles), nworkers, " + graphics card" if use_gpu_r else "", reduce,
+           "partial decoding" if _tj_ok() else "full decoding"))
     transform = Affine(gsd, 0, ox0 + origin[0], 0, -gsd, oy1 + origin[1])
     prof = ortho_profile(out_w, out_h, epsg, transform, settings)
     hw, hh = (out_w + 1) // 2, (out_h + 1) // 2
@@ -1036,16 +1047,26 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             seg = max(1, min(4, int(round(len(groups) / float(nworkers * 3)))))
             for i0 in range(0, len(groups), seg):
                 task_q.put(groups[i0:i0 + seg])
-            for _ in range(nworkers + n_gpu_r):
+            for _ in range(nworkers):
                 task_q.put(None)
-            procs = [ctxm.Process(target=render_worker_main, args=(ctx_file, task_q, res_q), daemon=True)
-                     for _ in range(nworkers)]
-            if n_gpu_r:
-                from .gpurender import gpu_render_worker_main
-                procs.append(ctxm.Process(target=gpu_render_worker_main, args=(ctx_file, task_q, res_q, gpu_threads),
-                                          daemon=True))
+            link = None
+            gsrv = None
+            if use_gpu_r:
+                from .gpurender import gpu_render_server_main, MAX_PENDING_PER_THREAD
+                link = {"job_q": ctxm.Queue(), "reply_qs": [ctxm.Queue() for _ in range(nworkers)],
+                        "state": ctxm.Array("i", [0, 0]), "max_pending": gpu_threads * MAX_PENDING_PER_THREAD}
+                mid = len(groups) // 2
+                test_groups = [groups[i] for i in (mid, mid + 1, len(groups) // 3, (2 * len(groups)) // 3)
+                               if 0 <= i < len(groups)]
+                gsrv = ctxm.Process(target=gpu_render_server_main,
+                                    args=(ctx_file, link["job_q"], link["reply_qs"], link["state"], res_q,
+                                          test_groups, gpu_threads), daemon=True)
                 from .sysinfo import GpuMonitor
                 gmon = GpuMonitor()
+            procs = [ctxm.Process(target=render_worker_main, args=(ctx_file, task_q, res_q, link, w), daemon=True)
+                     for w in range(nworkers)]
+            if gsrv is not None:
+                gsrv.start()
             for pr_ in procs:
                 pr_.start()
             t_write = [0.0]
@@ -1080,7 +1101,14 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             for t_ in wthreads:
                 t_.start()
             try:
+                gsrv_dead = False
                 while remaining:
+                    if gsrv is not None and not gsrv_dead and gsrv.exitcode not in (None, 0):
+                        # the GPU process died: workers take its blocks back and render on the CPU
+                        gsrv_dead = True
+                        link["state"][0] = -1
+                        log("GPU rendering stopped (the GPU process ended with code %s); the CPU workers "
+                            "finish the job" % gsrv.exitcode)
                     try:
                         item = res_q.get(timeout=5)
                     except _queue.Empty:
@@ -1092,7 +1120,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                     if item[0] == "error":
                         raise RuntimeError("Rendering failed: " + item[1])
                     if item[0] in ("gpu", "gpu_off"):
-                        log(("GPU: " if item[0] == "gpu" else "GPU not used: ") + item[1])
+                        log(("GPU: " if item[0] == "gpu" else "GPU not used: ") + str(item[-1]))
                         continue
                     _, res, tt = item
                     remaining -= 1
@@ -1109,6 +1137,18 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
                     wq[k].put(None)
                 for t_ in wthreads:
                     t_.join()
+                if gsrv is not None:
+                    link["job_q"].put(None)
+                    gsrv.join(timeout=20)
+                    while True:      # the GPU process's last words
+                        try:
+                            item = res_q.get_nowait()
+                        except _queue.Empty:
+                            break
+                        if item[0] in ("gpu", "gpu_off"):
+                            log(("GPU: " if item[0] == "gpu" else "GPU not used: ") + str(item[-1]))
+                    if gsrv.is_alive():
+                        gsrv.terminate()
                 for pr_ in procs:
                     if pr_.is_alive():
                         pr_.terminate()
@@ -1117,7 +1157,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
             if werr:
                 raise werr[0]
             t_write = t_write[0]
-            if n_gpu_r:
+            if gsrv is not None:
                 gs = gmon.stop()
                 if gs:
                     log("GPU busy during rendering: average %.0f%%, peak %.0f%%, memory up to %.1f GB"

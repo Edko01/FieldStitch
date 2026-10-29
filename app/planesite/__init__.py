@@ -1,5 +1,5 @@
 """PlaneSite - fast offline orthomosaic generation from drone photos."""
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 APP_NAME = "PlaneSite"
 UPDATE_REPO = "Edko01/PlaneSite"   # GitHub repo that hosts updates/latest.json
 RUNTIME = 3                          # version of the bundled python/ folder this app needs

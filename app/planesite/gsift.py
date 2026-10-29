@@ -102,10 +102,68 @@ def _up2(xp, a):
     return along(along(a, 0), 1)
 
 
+_PYR_SRC = r"""
+extern "C" __global__ void sift_up2(const float* a, float* out, const int rows, const int cols)
+{
+    // 2x bilinear upsample, pixel-centre aligned, edges clamped (same arithmetic as _up2)
+    const int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= 2 * cols || y >= 2 * rows) return;
+    const int iy = y >> 1, ix = x >> 1;
+    const int ny = (y & 1) ? min(iy + 1, rows - 1) : max(iy - 1, 0);
+    const int nx = (x & 1) ? min(ix + 1, cols - 1) : max(ix - 1, 0);
+    const float vc = 0.75f * a[iy * cols + ix] + 0.25f * a[ny * cols + ix];
+    const float vn = 0.75f * a[iy * cols + nx] + 0.25f * a[ny * cols + nx];
+    out[y * 2 * cols + x] = 0.75f * vc + 0.25f * vn;
+}
+
+extern "C" __global__ void sift_blur(const float* in, float* out, const int rows, const int cols,
+                                     const float* k, const int klen, const int axis)
+{
+    // 1-D correlation along rows (axis 0) or columns (axis 1), mirror edges (d c b | a b c d | c b a)
+    const int x = blockIdx.x * blockDim.x + threadIdx.x, y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= cols || y >= rows) return;
+    const int r = klen / 2, n = axis == 0 ? rows : cols, c0 = axis == 0 ? y : x;
+    float s = 0.0f;
+    for (int j = 0; j < klen; j++) {
+        int p = c0 + j - r;
+        if (n == 1) p = 0;
+        else while (p < 0 || p >= n) p = p < 0 ? -p : 2 * n - 2 - p;
+        s += k[j] * (axis == 0 ? in[p * cols + x] : in[y * cols + p]);
+    }
+    out[y * cols + x] = s;
+}
+"""
+
+
+def _blur_cuda(xp, img, k):
+    img = xp.ascontiguousarray(img)
+    rows, cols = img.shape
+    t = xp.empty_like(img)
+    out = xp.empty_like(img)
+    g = ((cols + 31) // 32, (rows + 7) // 8)
+    kern = _kernel(xp, "blur")
+    kern(g, (32, 8), (img, t, np.int32(rows), np.int32(cols), k, np.int32(k.size), np.int32(0)))
+    kern(g, (32, 8), (t, out, np.int32(rows), np.int32(cols), k, np.int32(k.size), np.int32(1)))
+    return out
+
+
+def _up2_cuda(xp, a):
+    a = xp.ascontiguousarray(a)
+    rows, cols = a.shape
+    out = xp.empty((2 * rows, 2 * cols), xp.float32)
+    _kernel(xp, "up2")(((2 * cols + 31) // 32, (2 * rows + 7) // 8), (32, 8), (a, out, np.int32(rows), np.int32(cols)))
+    return out
+
+
 def _pyramid(xp, ndi, gray):
     K = _kernels(xp)
     img = xp.asarray(gray, dtype=xp.float32) * (1.0 / 255.0)
-    base = _blur(ndi, _up2(xp, img), K.base)
+    if xp is not np and USE_CUDA_KERNELS[0]:
+        blur = lambda im, k: _blur_cuda(xp, im, k)   # noqa: E731
+        base = blur(_up2_cuda(xp, img), K.base)
+    else:
+        blur = lambda im, k: _blur(ndi, im, k)       # noqa: E731
+        base = blur(_up2(xp, img), K.base)
     n_oct = max(1, int(round(math.log2(min(gray.shape)) - 2)) + 1)
     gpyr, dpyr = [], []
     cur = base
@@ -114,7 +172,7 @@ def _pyramid(xp, ndi, gray):
             break
         layers = [cur]
         for i in range(1, N_LAYERS + 3):
-            layers.append(_blur(ndi, layers[-1], K.layer[i]))
+            layers.append(blur(layers[-1], K.layer[i]))
         gpyr.append(layers)
         dpyr.append(xp.stack([layers[i + 1] - layers[i] for i in range(N_LAYERS + 2)]))
         cur = layers[N_LAYERS][::2, ::2]
@@ -538,6 +596,7 @@ _KERNELS = {}
 def _kernel(xp, name):
     if name not in _KERNELS:
         src, fn = {"desc": (_DESC_SRC, "sift_desc"), "grad": (_GRAD_SRC, "sift_grad"),
+                   "blur": (_PYR_SRC, "sift_blur"), "up2": (_PYR_SRC, "sift_up2"),
                    "extrema": (_EXTREMA_SRC, "sift_extrema"), "refine": (_REFINE_SRC, "sift_refine"),
                    "ori": (_ORI_SRC, "sift_ori")}[name]
         # no fused multiply-add, so results follow the array version's rounding

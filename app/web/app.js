@@ -599,12 +599,50 @@ function drawOrtho() {
   const b = result.bounds;
   layers.ortho = L.tileLayer("/tiles/{z}/{x}/{y}.png?v=" + result.mtime, {
     tileSize: 256, minNativeZoom: 0, maxNativeZoom: result.max_native_zoom, minZoom: -4, maxZoom: 22,
-    noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 4, updateWhenZooming: false,
+    noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 6, updateWhenZooming: false, updateInterval: 60,
     opacity: +$("lyrOrthoOp").value,
   });
   if ($("lyrOrtho").checked) layers.ortho.addTo(map);
   layers.ortho.bringToBack();
   map.setMaxZoom(result.max_native_zoom + 3);
+  prefetch.seen = new Set();
+  prefetch.queue = [];
+  layers.ortho.on("load", () => { clearTimeout(prefetch.timer); prefetch.timer = setTimeout(prefetchTiles, 150); });
+}
+
+// While the map is idle, fetch the tiles just outside the view and the next zoom level in, so
+// panning and zooming in show finished tiles straight away (tiles are cached by the browser).
+const prefetch = { seen: new Set(), queue: [], active: 0, timer: 0 };
+function prefetchTiles() {
+  const lyr = layers.ortho;
+  if (!lyr || !map.hasLayer(lyr) || lyr._tileZoom === undefined) return;
+  const z = lyr._tileZoom, maxz = result.max_native_zoom, b = map.getBounds();
+  const want = [];
+  const range = (zz, pad, frac) => {
+    const c = b.getCenter(), h = (b.getNorth() - b.getSouth()) * frac / 2, w = (b.getEast() - b.getWest()) * frac / 2;
+    const p0 = map.project(L.latLng(c.lat + h, c.lng - w), zz).divideBy(256).floor();
+    const p1 = map.project(L.latLng(c.lat - h, c.lng + w), zz).divideBy(256).floor();
+    for (let y = p0.y - pad; y <= p1.y + pad; y++)
+      for (let x = p0.x - pad; x <= p1.x + pad; x++) {
+        const coords = L.point(x, y); coords.z = zz;
+        if (lyr._isValidTile(coords)) want.push("/tiles/" + zz + "/" + x + "/" + y + ".png?v=" + result.mtime);
+      }
+  };
+  range(z, 2, 1);                       // a ring of tiles around the view
+  if (z + 1 <= maxz) range(z + 1, 0, 0.6);  // the middle of the view, one level sharper
+  prefetch.queue = want.filter(u => !prefetch.seen.has(u)).slice(0, 120);
+  pumpPrefetch();
+}
+function pumpPrefetch() {
+  while (prefetch.active < 3 && prefetch.queue.length) {
+    const u = prefetch.queue.shift();
+    prefetch.seen.add(u);
+    prefetch.active++;
+    const img = new Image();
+    img.fetchPriority = "low";
+    img.onload = img.onerror = () => { prefetch.active--; pumpPrefetch(); };
+    img.src = u;
+  }
 }
 
 // ------------------------------------------------------------------ map
@@ -620,6 +658,7 @@ function initMap() {
   map.on("mouseup", onMapUp);
   map.on("click", onMapClick);
   map.on("dblclick", onMapDbl);
+  map.on("movestart zoomstart", () => { prefetch.queue = []; clearTimeout(prefetch.timer); });   // the view comes first
 }
 function clearLayers() {
   for (const k of ["cams", "ortho", "draft"]) if (layers[k]) { layers[k].remove(); layers[k] = null; }

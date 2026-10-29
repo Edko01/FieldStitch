@@ -22,6 +22,8 @@ MATCH_WS = {"fast": 0.3, "balanced": 0.4, "accurate": 0.75}        # per photo
 ALIGN_S = {"fast": 0.045, "balanced": 0.065, "accurate": 0.1}      # per photo on the reference PC
 RENDER_WS_PER_PHOTO = 0.75
 RENDER_WS_PER_MPX = 0.17
+RENDER_PARTIAL_DECODE = 0.85     # 1.6.1: only the needed rows of each photo are decoded
+RENDER_GPU = 0.5                 # 1.6.1: the card blends; CPU workers only plan and decode
 OVERVIEW_S_PER_MPX = 0.004
 FIXED_S = 20
 REF_WORKERS = 31
@@ -70,6 +72,15 @@ def _calibration():
             return min(4.0, max(0.25, v))
     except Exception:
         return 1.0
+
+
+def _render_scale(use_gpu):
+    try:
+        from .jpegcrop import present
+        f = RENDER_PARTIAL_DECODE if present() else 1.0
+    except Exception:
+        f = 1.0
+    return f * (RENDER_GPU if use_gpu else 1.0)
 
 
 def record_actual(estimated_s, actual_s):
@@ -173,7 +184,7 @@ def estimate(proj, settings, cached_features=0, workers=None, area_m2=None):
         "matching": n * MATCH_WS.get(preset, 0.4) / eff,
         "alignment": n * ALIGN_S.get(preset, 0.04) * min(rel, 4.0) * 0.8 + FIXED_S * 0.6,
         "surface": n * ALIGN_S.get(preset, 0.04) * min(rel, 4.0) * 0.2 + FIXED_S * 0.2,
-        "ortho": (n * RENDER_WS_PER_PHOTO + mpx * RENDER_WS_PER_MPX) / eff
+        "ortho": (n * RENDER_WS_PER_PHOTO + mpx * RENDER_WS_PER_MPX) / eff * _render_scale(use_gpu)
                  + mpx * OVERVIEW_S_PER_MPX * min(rel, 2.0) + FIXED_S * 0.2,
     }
     stages = {k: v * cal for k, v in stages.items()}

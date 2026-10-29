@@ -1,8 +1,8 @@
 {
- "version": "1.6.0",
+ "version": "1.6.1",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.0.zip",
- "sha256": "6c43e1d15f7336a39d456a685e585a74a3e13b4ee4967ccb6169434bf53a4dee",
- "notes": "PlaneSite 1.6.0 - FieldStitch is now PlaneSite:\n- New name and logo. Windows Task Manager now lists the app and its processing workers as PlaneSite instead of python.\n- Faster feature detection on the graphics card: finding, refining and orienting keypoints now run as dedicated GPU kernels, like the descriptors in 1.5.5. Results are identical to the previous version, and the card is still checked against the CPU before each job.\n- This version needs the full installer (PlaneSite-Setup-1.6.0.exe). It removes FieldStitch, keeps your settings and speed calibration, and installs PlaneSite in its place. Old FieldStitch projects are not moved.",
+ "app_zip": "updates/planesite-app-1.6.1.zip",
+ "sha256": "f7a0166c6c1484d9579b60b5a397b85bb66710522d654ca5e8d22e195ffb252d",
+ "notes": "PlaneSite 1.6.1:\n- Colour: fixes the patchy colour casts across large sites. Brightness changes with viewing angle relative to the sun, and the colour balancing used to add that up from one flight line to the next. PlaneSite now measures the sun-angle and lens-vignetting effect for the whole flight and removes it from every photo before balancing exposure. Process a project again to get the new colour (its feature step is reused, so it is quicker).\n- Rendering on the graphics card: CPU workers plan each block and decode only the part of each photo they need; the NVIDIA card does the warping and blending. If the card is busy the CPU renders the block itself, and if the card fails every block is redone on the CPU. Without a card, rendering is also faster: only the needed rows of each photo are decoded.\n- Feature detection: the blur pyramid now runs on the card too, and fast PCs use three GPU workers.\n- Map viewer: much smoother. Tiles are cached, zoomed-out levels are prepared in the background, nearby tiles are fetched ahead, and fully covered tiles are sent as small JPEGs.",
  "date": "2026-10-28"
 }

@@ -55,8 +55,35 @@ def footprint(R, C, k, W, H, dsm, n=12):
 
 
 # ------------------------------------------------------------------------ exposure gains
+def view_features(P, cam, u, v):
+    """Viewing-geometry terms for each ground point P seen by cam at pixel (u, v): the horizontal
+    offset from the camera relative to its height (world frame, so sun-angle effects keep their
+    direction whichever way the drone flies), its squares and product, and the squared distance
+    from the image centre (lens vignetting)."""
+    agl = max(cam["agl"], 1.0)
+    dx = (P[:, 0] - cam["C"][0]) / agl
+    dy = (P[:, 1] - cam["C"][1]) / agl
+    f, cx, cy = cam["k"][0], cam["k"][1], cam["k"][2]
+    r2 = ((u - cx) / f) ** 2 + ((v - cy) / f) ** 2
+    return np.stack([dx, dy, dx * dx, dy * dy, dx * dy, r2], 1)
+
+
+N_VIEW = 6
+
+
+def view_correction(view, F):
+    """Per-channel brightness factors (n, 3) that remove the fitted viewing-angle effect."""
+    if view is None:
+        return np.ones((F.shape[0], 3))
+    return np.clip(np.exp(F @ np.asarray(view).T), 0.7, 1.4)
+
+
 def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
-    """Per-image RGB gains that equalise overlapping images (log-domain least squares)."""
+    """Per-image RGB gains that equalise overlapping images (log-domain least squares), solved
+    together with one shared viewing-angle model per channel (sun angle and vignetting). Without
+    that model, the brightness difference between photos that see the ground from opposite sides
+    adds up from one flight line to the next and shows as large colour casts across the site.
+    Returns (gains (n, 3), view coefficients (3, N_VIEW))."""
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
     xmin, ymin, xmax, ymax = bounds
@@ -75,6 +102,7 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
     samp_pt = []
     samp_img = []
     samp_val = []
+    samp_f = []
     for ci, cam in enumerate(cams):
         th = thumbs[ci]
         if th is None:
@@ -88,7 +116,7 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
         idx = (np.arange(r0, r1)[:, None] * len(gx) + np.arange(c0, c1)[None, :]).ravel()
         u, v, z = project_pts(cam["R"], cam["C"], cam["k"], P[idx])
         W, H = cam["W"], cam["H"]
-        ok = (z > 0) & (u > 0.1 * W) & (u < 0.9 * W) & (v > 0.1 * H) & (v < 0.9 * H)
+        ok = (z > 0) & (u > 0.03 * W) & (u < 0.97 * W) & (v > 0.03 * H) & (v < 0.97 * H)
         if not ok.any():
             continue
         th_h, th_w = th.shape[:2]
@@ -103,17 +131,18 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
         samp_pt.append(idx[ok][good])
         samp_img.append(np.full(good.sum(), ci))
         samp_val.append(np.log(val[good]))
+        samp_f.append(view_features(P[idx[ok][good]], cam, u[ok][good], v[ok][good]))
     n = len(cams)
     gains = np.ones((n, 3))
+    view = np.zeros((3, N_VIEW))
     if not samp_pt:
-        return gains
+        return gains, view
     sp_pt = np.concatenate(samp_pt)
     sp_img = np.concatenate(samp_img)
     sp_val = np.concatenate(samp_val)
+    sp_f = np.concatenate(samp_f)
     o = np.argsort(sp_pt, kind="stable")
-    sp_pt, sp_img, sp_val = sp_pt[o], sp_img[o], sp_val[o]
-    starts = np.flatnonzero(np.r_[True, sp_pt[1:] != sp_pt[:-1]])
-    ends = np.r_[starts[1:], len(sp_pt)]
+    sp_pt, sp_img, sp_val, sp_f = sp_pt[o], sp_img[o], sp_val[o], sp_f[o]
     # build pairs: each sample vs the next few samples of the same point
     ia = []
     ib = []
@@ -126,31 +155,40 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
     ia = np.concatenate(ia)
     ib = np.concatenate(ib)
     if len(ia) < 10:
-        return gains
-    lam = 0.05 * math.sqrt(len(ia) / max(n, 1))
+        return gains, view
+    per_img = 2.0 * len(ia) / max(n, 1)          # pair constraints touching an average photo
+    lam = math.sqrt(0.01 * per_img)              # pull towards no change: damps slow drift only
+    lam_v = math.sqrt(1e-3 * len(ia))            # light ridge on the shared view model
+    dF = sp_f[ia] - sp_f[ib]
     for ch in range(3):
         rhs = sp_val[ib, ch] - sp_val[ia, ch]
         keep = np.ones(len(ia), bool)
-        g = np.zeros(n)
-        for it in range(2):
-            ka, kb, r = ia[keep], ib[keep], rhs[keep]
+        for it in range(3):
+            ka, kb, r, df = ia[keep], ib[keep], rhs[keep], dF[keep]
             m = len(ka)
-            rows = np.r_[np.arange(m), np.arange(m), m + np.arange(n)]
-            cols = np.r_[sp_img[ka], sp_img[kb], np.arange(n)]
-            vals = np.r_[np.ones(m), -np.ones(m), np.full(n, lam)]
-            A = sp.csr_matrix((vals, (rows, cols)), shape=(m + n, n))
-            b = np.r_[r, np.zeros(n)]
-            # normal equations: small (photos x photos), sparse, well conditioned thanks to lam
-            g = spla.spsolve((A.T @ A).tocsc(), A.T @ b)
-            res = g[sp_img[ia]] - g[sp_img[ib]] - rhs
-            keep = np.abs(res) < 0.12
+            # unknowns: n photo log-gains, then N_VIEW shared view terms
+            rows = np.r_[np.repeat(np.arange(m), 2 + N_VIEW), m + np.arange(n), m + n + np.arange(N_VIEW)]
+            cols = np.r_[np.c_[sp_img[ka], sp_img[kb], n + np.tile(np.arange(N_VIEW), (m, 1))].ravel(),
+                         np.arange(n), n + np.arange(N_VIEW)]
+            vals = np.r_[np.c_[np.ones(m), -np.ones(m), df].ravel(), np.full(n, lam), np.full(N_VIEW, lam_v)]
+            A = sp.csr_matrix((vals, (rows, cols)), shape=(m + n + N_VIEW, n + N_VIEW))
+            b = np.r_[r, np.zeros(n + N_VIEW)]
+            x = spla.spsolve((A.T @ A).tocsc(), A.T @ b)
+            g, vw = x[:n], x[n:]
+            res = g[sp_img[ia]] - g[sp_img[ib]] + dF @ vw - rhs
+            keep = np.abs(res) < (0.12 if it else 0.25)
         gains[:, ch] = np.exp(g)
+        view[ch] = vw
     # keep the overall brightness unchanged
     gains /= np.exp(np.mean(np.log(gains), axis=0, keepdims=True))
     gains = np.clip(gains, 0.6, 1.6)
     if log:
-        log("Exposure balance: %d overlap samples, gain range %.2f-%.2f" % (len(ia), gains.min(), gains.max()))
-    return gains
+        lg = np.log(gains)
+        cast = lg - lg.mean(1, keepdims=True)
+        log("Exposure balance: %d overlap samples, gain range %.2f-%.2f, colour spread %.2f, view model %s"
+            % (len(ia), gains.min(), gains.max(), float(np.ptp(cast)),
+               " ".join("%+.3f" % x for x in view.ravel())))
+    return gains, view
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -173,27 +211,43 @@ def init_render(ctx_file):
         pass
 
 
-def _get_image(ci):
-    if ci in _IMG_CACHE:
+def _get_window(ci, x0, y0, x1, y1):
+    """Pixels [x0, x1) x [y0, y1) (clipped) of photo ci at decode scale, as a view, and the window's
+    top-left corner. Only the needed rows are decoded (full width); the strip is kept for the next
+    block, which usually needs the same rows of the photo further along."""
+    ent = _IMG_CACHE.get(ci)
+    if ent is not None and ent[0] <= max(0, y0) and ent[1] >= y1 and ent[2] is not None:
         _IMG_CACHE.move_to_end(ci)
-        return _IMG_CACHE[ci]
-    cam = _RCTX["cams"][ci]
-    import time
-    from .features import read_file, decode
-    t0 = time.perf_counter()
-    buf = read_file(cam["path"])
-    t1 = time.perf_counter()
-    img = decode(buf, _RCTX["reduce"], color=True)
-    _T["read"] += t1 - t0
-    _T["decode"] += time.perf_counter() - t1
-    _T["bytes"] += int(buf.nbytes)
-    _T["loads"] += 1
-    _IMG_CACHE[ci] = img
-    _IMG_BYTES[0] += img.nbytes
-    while _IMG_BYTES[0] > _RCTX["cache_bytes"] and len(_IMG_CACHE) > 2:
-        _, old = _IMG_CACHE.popitem(last=False)
-        _IMG_BYTES[0] -= old.nbytes
-    return img
+        by0, by1, band = ent
+        y1 = min(y1, by1)
+    else:
+        if ent is not None:
+            _IMG_CACHE.pop(ci)
+            _IMG_BYTES[0] -= ent[2].nbytes
+        cam = _RCTX["cams"][ci]
+        from .features import read_file
+        from .jpegcrop import decode_rows
+        t0 = time.perf_counter()
+        buf = read_file(cam["path"])
+        t1 = time.perf_counter()
+        band, by0 = decode_rows(buf, max(0, y0), y1, _RCTX["reduce"])
+        by1 = by0 + band.shape[0]
+        _T["read"] += t1 - t0
+        _T["decode"] += time.perf_counter() - t1
+        _T["bytes"] += int(buf.nbytes)
+        _T["loads"] += 1
+        _IMG_CACHE[ci] = (by0, by1, band)
+        _IMG_BYTES[0] += band.nbytes
+        while _IMG_BYTES[0] > _RCTX["cache_bytes"] and len(_IMG_CACHE) > 1:
+            _, old = _IMG_CACHE.popitem(last=False)
+            _IMG_BYTES[0] -= old[2].nbytes
+        y1 = min(y1, by1)
+    x0 = max(0, x0)
+    y0 = max(by0, y0)
+    x1 = min(band.shape[1], x1)
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((0, 0, 3), np.uint8), x0, y0
+    return band[y0 - by0:y1 - by0, x0:x1], x0, y0
 
 
 def _smoothstep(x):
@@ -225,22 +279,23 @@ def render_region(region, tiles):
     upsample = _upsampler(step)
 
     for a, ci, r0, r1, c0, c1 in plan["items"]:
-        h, w = r1 - r0, c1 - c0
-        wa = Wt[a].reshape(ncy, ncx)
-        w_f = upsample(wa.astype(np.float32), r0, c0, h, w)
-        if w_f.max() <= 0:
+        prep = prepare_item(plan, a, ci, r0, r1, c0, c1)
+        if prep is None:
             continue
-        uv = np.dstack([U[a].reshape(ncy, ncx), V[a].reshape(ncy, ncx)]).astype(np.float32)
-        if r != 1:
-            uv = (uv + 0.5) / r - 0.5
-        uv_f = upsample(uv, r0, c0, h, w)
-        img = _get_image(ci)
+        coarse, gi0, gj0, crop = prep
+        h, w = r1 - r0, c1 - c0
         tw0 = time.perf_counter()
+        # weight x correction (B, G, R), weight, and photo position: bilinear from the grid
+        M = np.array([[1.0 / step, 0, (c0 - gj0 * step) / step], [0, 1.0 / step, (r0 - gi0 * step) / step]], np.float64)
+        wg_f = cv2.warpAffine(np.ascontiguousarray(coarse[..., :4]), M, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                              borderMode=cv2.BORDER_REPLICATE)
+        uv_f = cv2.warpAffine(np.ascontiguousarray(coarse[..., 4:]), M, (w, h),
+                              flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REPLICATE)
+        w_f = np.ascontiguousarray(wg_f[..., 3])
+        w3 = np.ascontiguousarray(wg_f[..., :3])
         m1, m2 = cv2.convertMaps(uv_f, None, cv2.CV_16SC2)
-        samp = cv2.remap(img, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        samp = cv2.remap(crop, m1, m2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         _T["warp"] += time.perf_counter() - tw0
-        g = c["cams"][ci]["gain"]
-        w3 = cv2.merge([w_f * g[2], w_f * g[1], w_f * g[0]])  # BGR gains folded into the weights
         av = acc[r0:r1, c0:c1]
         cv2.add(av, cv2.multiply(samp, w3, dtype=cv2.CV_32F), dst=av)
         wv = wsum[r0:r1, c0:c1]
@@ -255,6 +310,68 @@ def render_region(region, tiles):
     alpha = cv2.multiply(valid, 255)
     rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
     return cut_tiles(region, tiles, rgb, alpha)
+
+
+def item_weights(plan, a, ci, win):
+    """Coarse-grid float32 (gh, gw, 4) over the window win = (gi0, gi1, gj0, gj1): blend weight x
+    colour correction for B, G, R, and the blend weight itself. The correction is the photo's
+    exposure gain times the shared viewing-angle factor at each grid point."""
+    c = _RCTX
+    ncy, ncx = plan["ncy"], plan["ncx"]
+    gi0, gi1, gj0, gj1 = win
+    idx = (np.arange(gi0, gi1)[:, None] * ncx + np.arange(gj0, gj1)[None, :]).ravel()
+    wa = plan["Wt"][a][idx]
+    cam = c["cams"][ci]
+    corr = np.tile(np.asarray(cam["gain"], np.float64), (wa.size, 1))
+    view = cam.get("view")
+    live = wa > 0
+    if view is not None and live.any():
+        il = idx[live]
+        F = view_features(plan["P"][il], cam, plan["U"][a][il].astype(np.float64), plan["V"][a][il].astype(np.float64))
+        corr[live] *= view_correction(view, F)
+    out = np.empty((wa.size, 4), np.float32)
+    out[:, 0] = wa * corr[:, 2]
+    out[:, 1] = wa * corr[:, 1]
+    out[:, 2] = wa * corr[:, 0]
+    out[:, 3] = wa
+    return out.reshape(gi1 - gi0, gj1 - gj0, 4)
+
+
+def prepare_item(plan, a, ci, r0, r1, c0, c1):
+    """Everything needed to draw one photo into one block, shared by the CPU and GPU renderers:
+    (coarse, gi0, gj0, crop) where coarse is float32 (gh, gw, 6) on the coarse grid window
+    starting at grid point (gi0, gj0): weight x correction for B, G, R, the weight, and the
+    photo position u, v relative to crop, the decoded window of the photo (BGR uint8) that holds
+    every pixel the block samples. None when the photo adds nothing."""
+    step, ncy, ncx = plan["step"], plan["ncy"], plan["ncx"]
+    gi0, gj0 = r0 // step, c0 // step
+    gi1 = min(ncy, -(-(r1 - 1) // step) + 1)
+    gj1 = min(ncx, -(-(c1 - 1) // step) + 1)
+    win = (gi0, gi1, gj0, gj1)
+    wg = item_weights(plan, a, ci, win)
+    if wg[..., 3].max() <= 0:
+        return None
+    r = _RCTX["reduce"]
+    U = plan["U"][a].reshape(ncy, ncx)[gi0:gi1, gj0:gj1]
+    V = plan["V"][a].reshape(ncy, ncx)[gi0:gi1, gj0:gj1]
+    if r != 1:
+        U = (U + 0.5) / r - 0.5
+        V = (V + 0.5) / r - 0.5
+    # every fine pixel with weight > 0 interpolates u, v between grid points next to a weighted one
+    m = cv2.dilate((wg[..., 3] > 0).astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    us, vs = U[m], V[m]
+    x0 = int(math.floor(us.min())) - 2
+    x1 = int(math.ceil(us.max())) + 3
+    y0 = int(math.floor(vs.min())) - 2
+    y1 = int(math.ceil(vs.max())) + 3
+    crop, ox, oy = _get_window(ci, x0, y0, x1, y1)
+    if crop.size == 0:
+        return None
+    coarse = np.empty(wg.shape[:2] + (6,), np.float32)
+    coarse[..., :4] = wg
+    coarse[..., 4] = U - ox
+    coarse[..., 5] = V - oy
+    return coarse, gi0, gj0, crop
 
 
 def _upsampler(step):
@@ -352,7 +469,7 @@ def region_plan(region, tiles):
             continue
         items.append((a, ci, int(r0), int(r1), int(c0), int(c1)))
     return {"cand": cand, "Wt": Wt, "U": U, "V": V, "covered": covered, "ncy": ncy, "ncx": ncx,
-            "step": step, "items": items}
+            "step": step, "items": items, "P": P}
 
 
 def half_res(rgb, alpha):
@@ -374,20 +491,76 @@ def _with_half(tile, rgb, alpha):
     return tile, rgb, alpha, h_rgb, h_a
 
 
-def render_worker_main(ctx_file, task_q, res_q):
-    """Render worker: pull runs of tile groups, stream each group's tiles back."""
+def render_worker_main(ctx_file, task_q, res_q, link=None, wid=0):
+    """Render worker: pull runs of tile groups, stream each group's tiles back. With a GPU link,
+    blocks go to the card (this worker only plans them and decodes the photo windows) whenever
+    the card has room; otherwise the worker renders them itself."""
     import traceback
+    gl = None
     try:
         init_render(ctx_file)
+        if link is not None:
+            from .gpurender import GpuLink
+            gl = GpuLink(wid, link)
+
+        def finish(done):
+            for group, res, snap in done:
+                if res is None:      # the card failed: render here
+                    res, snap2 = render_group(group)
+                    for k, v in snap2.items():
+                        snap[k] = snap.get(k, 0) + v
+                res_q.put(("ok", res, snap))
+
         while True:
             seg = task_q.get()
             if seg is None:
                 break
             for group in seg:
-                res, snap = render_group(group)
-                res_q.put(("ok", res, snap))
+                if gl is not None and gl.usable():
+                    r = _gpu_group(gl, group)
+                    if r is not None:
+                        res_q.put(("ok",) + r)
+                    finish(gl.collect(block=not gl.free))
+                else:
+                    res, snap = render_group(group)
+                    res_q.put(("ok", res, snap))
+                    if gl is not None and gl.out:
+                        finish(gl.collect(block=False))
+        while gl is not None and gl.out:
+            finish(gl.collect(block=True))
     except Exception:
         res_q.put(("error", traceback.format_exc()))
+    finally:
+        if gl is not None:
+            gl.close()
+
+
+def _snap():
+    snap = dict(_T)
+    for k in _T:
+        _T[k] = 0 if k in ("bytes", "loads") else 0.0
+    return snap
+
+
+def _gpu_group(gl, group):
+    """Plan a block and decode its photo windows here; the card does the rest. Returns
+    (tiles, snap) when there was nothing for the card (empty block), else None."""
+    from .gpurender import prepare_block
+    t0 = time.perf_counter()
+    x0 = min(t[0] for t in group)
+    y0 = min(t[1] for t in group)
+    region = (x0, y0, max(t[0] + t[2] for t in group) - x0, max(t[1] + t[3] for t in group) - y0)
+    plan, preps = prepare_block(region, group)
+    if not preps:
+        res = [_with_half(t, np.zeros((t[3], t[2], 3), np.uint8), np.zeros((t[3], t[2]), np.uint8)) for t in group]
+        _T["total"] += time.perf_counter() - t0
+        return res, _snap()
+    snap = {}
+    gl.submit(group, region, plan, preps, snap)
+    _T["total"] += time.perf_counter() - t0
+    snap.update(_snap())
+    snap["gpu_blocks"] = 1
+    return None
 
 
 def render_group(group):
