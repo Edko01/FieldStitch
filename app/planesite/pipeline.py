@@ -41,6 +41,7 @@ DEFAULT_SETTINGS = {
     "trim_edges": True,         # drop ragged edges seen by only one photo
     "workers": None,
     "gpu": "auto",              # auto | off
+    "look": "vivid",            # vivid (more contrast and colour) | natural (as photographed)
 }
 
 STAGES = [("features", 0.22), ("matching", 0.26), ("alignment", 0.17), ("surface", 0.05), ("ortho", 0.30)]
@@ -725,6 +726,7 @@ def _run(project_dir, prog):
 
     T.lap("surface model")
     # exposure balance
+    colour_stats = None
     if settings.get("exposure_balance", True):
         prog.set("surface", 0.6, "Balancing exposure", force=True)
         import cv2
@@ -741,11 +743,11 @@ def _run(project_dir, prog):
             thumbs = list(ex.map(load_thumb, cams))
         from .ortho import compute_gains
         spacing = max(2.0, float(np.median([2 * hs for hs in half_short[ia]])) / 14.0)
-        gains, view = compute_gains(cams, thumbs, dsm, (ox0, oy0, ox1, oy1), spacing, log)
-        view = view.tolist()
-        for c, gn in zip(cams, gains):
+        gains, view, colour_stats = compute_gains(cams, thumbs, dsm, (ox0, oy0, ox1, oy1), spacing, log,
+                                                  times=[meta[c["idx"]].get("time") for c in cams])
+        for c, gn, vw in zip(cams, gains, view):
             c["gain"] = tuple(float(x) for x in gn)
-            c["view"] = view   # shared viewing-angle correction (sun angle, vignetting) per channel
+            c["view"] = vw.tolist()   # this flight's viewing-angle correction (sun angle, vignetting)
         del thumbs
 
     # save reconstruction
@@ -760,7 +762,13 @@ def _run(project_dir, prog):
     # ---------------------------------------------------------------- ortho
     name = safe_name(proj.get("name", "project"))
     ortho_path = os.path.join(out_dir, "%s_orthomosaic.tif" % name)
-    write_orthomosaic(ortho_path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T)
+    from .ortho import look_params
+    look = look_params(settings.get("look", "vivid"), colour_stats)
+    if look:
+        log("Colours: vivid (contrast x%.2f around brightness %.0f, saturation x%.2f)"
+            % (look["contrast"], look["mid"], look["saturation"]))
+    write_orthomosaic(ortho_path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T,
+                      look=look)
 
     seam = None
     try:
@@ -958,7 +966,8 @@ def ortho_profile(width, height, epsg, transform, settings):
     return prof
 
 
-def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T=None):
+def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h, settings, prog, log, work, T=None,
+                      look=None):
     import rasterio
     from rasterio.transform import Affine
     from rasterio.windows import Window
@@ -1001,7 +1010,7 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
            "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
            "cache_bytes": cache_bytes,
-           "min_views": 2 if settings.get("trim_edges", True) else 1}
+           "min_views": 2 if settings.get("trim_edges", True) else 1, "look": look}
     ctx_file = os.path.join(work, "render_ctx.pkl")
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)

@@ -473,6 +473,7 @@ function openOptions() {
   document.querySelectorAll("input[name=preset]").forEach((r) => (r.checked = r.value === s.preset));
   document.querySelectorAll("input[name=surface]").forEach((r) => (r.checked = r.value === s.surface));
   document.querySelectorAll("input[name=compression]").forEach((r) => (r.checked = r.value === s.compression));
+  document.querySelectorAll("input[name=look]").forEach((r) => (r.checked = r.value === (s.look || "vivid")));
   $("optExposure").checked = !!s.exposure_balance;
   $("optTrim").checked = s.trim_edges !== false;
   $("optGpu").checked = s.gpu !== "off";
@@ -511,6 +512,7 @@ function readOptions() {
     preset: v("preset") || "balanced",
     surface: v("surface") || "fields",
     compression: v("compression") || "jpeg",
+    look: v("look") || "vivid",
     exposure_balance: $("optExposure").checked,
     trim_edges: $("optTrim").checked,
     gpu: $("optGpu").checked ? "auto" : "off",

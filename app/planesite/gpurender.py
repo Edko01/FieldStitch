@@ -95,7 +95,8 @@ extern "C" __global__ void ps_acc_item(const float* coarse, const int gh, const 
 
 extern "C" __global__ void ps_finish(const float* acc, const float* wsum, const float* cov,
         const int ncy, const int ncx, const int step, const int th, const int tw,
-        unsigned char* rgb, unsigned char* alpha)
+        unsigned char* rgb, unsigned char* alpha, const int use_look, const float lmid, const float lk,
+        const float lsat)
 {
     // normalise, coverage edge, 8-bit RGB and alpha
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
@@ -111,8 +112,19 @@ extern "C" __global__ void ps_finish(const float* acc, const float* wsum, const 
     const bool valid = (ws > 1e-4f) && (covf >= 0.5f);
     alpha[o] = valid ? 255 : 0;
     const float inv = 1.0f / fmaxf(ws, 1e-6f);
+    float v[3];
+    for (int c = 0; c < 3; c++) v[c] = acc[o * 3 + c] * inv;
+    if (use_look) {
+        // contrast around the mosaic's median brightness, then saturation (same as ortho.apply_look)
+        const float y = (0.114f * v[0] + 0.587f * v[1]) + 0.299f * v[2];
+        const float y2 = lmid + (y - lmid) * lk;
+        const float mx = fmaxf(fmaxf(v[0], v[1]), v[2]), mn = fminf(fminf(v[0], v[1]), v[2]);
+        const float rel = (mx - mn) / fmaxf(mx, 1.0f);
+        const float se = 1.0f + (lsat - 1.0f) * (1.0f - rel);    // vibrance
+        for (int c = 0; c < 3; c++) v[c] = fminf(fmaxf(y2 + se * (v[c] - y), 0.0f), 255.0f);
+    }
     for (int c = 0; c < 3; c++) {
-        int q = __float2int_rn(fabsf(acc[o * 3 + c] * inv));
+        int q = __float2int_rn(fabsf(v[c]));
         q = min(max(q, 0), 255);
         rgb[o * 3 + (2 - c)] = valid ? (unsigned char)q : 0;   // BGR -> RGB
     }
@@ -229,8 +241,10 @@ class _EmuDev:
         ct = self.ct
         conv = []
         for a in args:
-            if isinstance(a, np.ndarray):
+            if isinstance(a, np.ndarray) and a.ndim > 0:
                 conv.append(ct.c_void_p(a.ctypes.data))
+            elif isinstance(a, (np.floating, float)):
+                conv.append(ct.c_float(float(a)))
             else:
                 conv.append(ct.c_int(int(a)))
         getattr(self.lib, "run_" + name)(ct.c_int(grid[0]), ct.c_int(grid[1]), ct.c_int(block[0]),
@@ -281,6 +295,7 @@ def pack_block(buf_for, region, plan, preps):
         dst = buf[cr:cr + ch * cw * 3].reshape(ch, cw, 3)
         dst[...] = crop
     job = {"region": region, "step": plan["step"], "ncy": plan["ncy"], "ncx": plan["ncx"], "cov_off": cov_off,
+           "look": ortho._RCTX.get("look") if ortho._RCTX else None,
            "items": lay, "in_bytes": in_bytes, "out_off": out_off, "total": total}
     return job, buf
 
@@ -302,12 +317,14 @@ def run_block(dev, job, buf):
                     np.int32(step), crop, np.int32(ch), np.int32(cw), np.int32(r0), np.int32(c0), np.int32(h),
                     np.int32(w), np.int32(tw), acc, wsum))
     cov = dev.view(d_in, job["cov_off"], job["ncy"] * job["ncx"], np.float32)
+    lk = job.get("look")
     out = dev.empty_u8("out", th * tw * 4)
     rgb = out[:th * tw * 3]
     alpha = out[th * tw * 3:]
     dev.launch("ps_finish", ((tw + B[0] - 1) // B[0], (th + B[1] - 1) // B[1]), B,
                (acc, wsum, cov, np.int32(job["ncy"]), np.int32(job["ncx"]), np.int32(step), np.int32(th),
-                np.int32(tw), rgb, alpha))
+                np.int32(tw), rgb, alpha, np.int32(1 if lk else 0), np.float32(lk["mid"] if lk else 0),
+                np.float32(lk["contrast"] if lk else 1), np.float32(lk["saturation"] if lk else 1)))
     dev.download(out, buf[job["out_off"]:job["out_off"] + th * tw * 4])
 
 

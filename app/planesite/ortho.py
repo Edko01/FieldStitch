@@ -78,12 +78,39 @@ def view_correction(view, F):
     return np.clip(np.exp(F @ np.asarray(view).T), 0.7, 1.4)
 
 
-def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
+def flight_segments(times, gap_s=150.0, min_photos=40):
+    """Split photos into flights by gaps in capture time (battery swaps). Returns a segment index
+    per photo; 0 for all when times are missing. Very short pieces join the previous flight."""
+    n = len(times)
+    t = np.array([np.nan if v is None else float(v) for v in times], np.float64)
+    if n == 0 or np.isnan(t).mean() > 0.2:
+        return np.zeros(n, np.int64), 1
+    t = np.where(np.isnan(t), np.nanmedian(t), t)
+    order = np.argsort(t, kind="stable")
+    seg_sorted = np.zeros(n, np.int64)
+    cur = 0
+    count = 1
+    for k in range(1, n):
+        if t[order[k]] - t[order[k - 1]] > gap_s and count >= min_photos:
+            cur += 1
+            count = 0
+        seg_sorted[k] = cur
+        count += 1
+    if cur > 0 and count < min_photos:      # a short last piece joins the previous flight
+        seg_sorted[seg_sorted == cur] = cur - 1
+        cur -= 1
+    seg = np.empty(n, np.int64)
+    seg[order] = seg_sorted
+    return seg, cur + 1
+
+
+def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None, times=None):
     """Per-image RGB gains that equalise overlapping images (log-domain least squares), solved
     together with one shared viewing-angle model per channel (sun angle and vignetting). Without
     that model, the brightness difference between photos that see the ground from opposite sides
     adds up from one flight line to the next and shows as large colour casts across the site.
-    Returns (gains (n, 3), view coefficients (3, N_VIEW))."""
+    Each flight (separated by a battery swap) gets its own viewing-angle model, because the sun
+    moves between flights. Returns (gains (n, 3), view coefficients per photo (n, 3, N_VIEW))."""
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
     xmin, ymin, xmax, ymax = bounds
@@ -134,9 +161,10 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
         samp_f.append(view_features(P[idx[ok][good]], cam, u[ok][good], v[ok][good]))
     n = len(cams)
     gains = np.ones((n, 3))
-    view = np.zeros((3, N_VIEW))
+    seg, nseg = flight_segments(times if times is not None else [None] * n)
+    view = np.zeros((nseg, 3, N_VIEW))
     if not samp_pt:
-        return gains, view
+        return gains, view[seg], None
     sp_pt = np.concatenate(samp_pt)
     sp_img = np.concatenate(samp_img)
     sp_val = np.concatenate(samp_val)
@@ -155,40 +183,50 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None):
     ia = np.concatenate(ia)
     ib = np.concatenate(ib)
     if len(ia) < 10:
-        return gains, view
+        return gains, view[seg], None
     per_img = 2.0 * len(ia) / max(n, 1)          # pair constraints touching an average photo
     lam = math.sqrt(0.01 * per_img)              # pull towards no change: damps slow drift only
-    lam_v = math.sqrt(1e-3 * len(ia))            # light ridge on the shared view model
-    dF = sp_f[ia] - sp_f[ib]
+    lam_v = math.sqrt(1e-3 * len(ia) / nseg)     # light ridge on each flight's view model
+    nv = nseg * N_VIEW
+    sa, sb = seg[sp_img[ia]], seg[sp_img[ib]]
+    corrected = np.empty((len(sp_val), 3))
     for ch in range(3):
         rhs = sp_val[ib, ch] - sp_val[ia, ch]
         keep = np.ones(len(ia), bool)
         for it in range(3):
-            ka, kb, r, df = ia[keep], ib[keep], rhs[keep], dF[keep]
+            ka, kb, r = ia[keep], ib[keep], rhs[keep]
             m = len(ka)
-            # unknowns: n photo log-gains, then N_VIEW shared view terms
-            rows = np.r_[np.repeat(np.arange(m), 2 + N_VIEW), m + np.arange(n), m + n + np.arange(N_VIEW)]
-            cols = np.r_[np.c_[sp_img[ka], sp_img[kb], n + np.tile(np.arange(N_VIEW), (m, 1))].ravel(),
-                         np.arange(n), n + np.arange(N_VIEW)]
-            vals = np.r_[np.c_[np.ones(m), -np.ones(m), df].ravel(), np.full(n, lam), np.full(N_VIEW, lam_v)]
-            A = sp.csr_matrix((vals, (rows, cols)), shape=(m + n + N_VIEW, n + N_VIEW))
-            b = np.r_[r, np.zeros(n + N_VIEW)]
+            # unknowns: n photo log-gains, then N_VIEW view terms per flight
+            ar = np.arange(m)
+            va = n + sa[keep][:, None] * N_VIEW + np.arange(N_VIEW)[None]
+            vb = n + sb[keep][:, None] * N_VIEW + np.arange(N_VIEW)[None]
+            rows = np.r_[ar, ar, np.repeat(ar, N_VIEW), np.repeat(ar, N_VIEW), m + np.arange(n), m + n + np.arange(nv)]
+            cols = np.r_[sp_img[ka], sp_img[kb], va.ravel(), vb.ravel(), np.arange(n), n + np.arange(nv)]
+            vals = np.r_[np.ones(m), -np.ones(m), sp_f[ka].ravel(), -sp_f[kb].ravel(), np.full(n, lam), np.full(nv, lam_v)]
+            A = sp.csr_matrix((vals, (rows, cols)), shape=(m + n + nv, n + nv))
+            b = np.r_[r, np.zeros(n + nv)]
             x = spla.spsolve((A.T @ A).tocsc(), A.T @ b)
-            g, vw = x[:n], x[n:]
-            res = g[sp_img[ia]] - g[sp_img[ib]] + dF @ vw - rhs
+            g, vw = x[:n], x[n:].reshape(nseg, N_VIEW)
+            corr = g[sp_img] + (sp_f * vw[seg[sp_img]]).sum(1)       # log correction per sample
+            res = corr[ia] - corr[ib] - rhs
             keep = np.abs(res) < (0.12 if it else 0.25)
+        # keep the mosaic as bright as the photos: the average correction over all samples is zero
+        g -= corr.mean()
+        corr -= corr.mean()
         gains[:, ch] = np.exp(g)
-        view[ch] = vw
-    # keep the overall brightness unchanged
-    gains /= np.exp(np.mean(np.log(gains), axis=0, keepdims=True))
+        view[:, ch] = vw
+        corrected[:, ch] = np.exp(sp_val[:, ch] + corr)
     gains = np.clip(gains, 0.6, 1.6)
     if log:
         lg = np.log(gains)
         cast = lg - lg.mean(1, keepdims=True)
-        log("Exposure balance: %d overlap samples, gain range %.2f-%.2f, colour spread %.2f, view model %s"
-            % (len(ia), gains.min(), gains.max(), float(np.ptp(cast)),
-               " ".join("%+.3f" % x for x in view.ravel())))
-    return gains, view
+        log("Exposure balance: %d overlap samples, %d flight%s, gain range %.2f-%.2f, colour spread %.2f, "
+            "sun/vignetting model (R, flight 1) %s"
+            % (len(ia), nseg, "" if nseg == 1 else "s", gains.min(), gains.max(), float(np.ptp(cast)),
+               " ".join("%+.3f" % x for x in view[0, 0])))
+    lum = corrected @ np.array([0.299, 0.587, 0.114])
+    stats = {"median_lum": float(np.median(lum)), "p5": float(np.percentile(lum, 5)), "p95": float(np.percentile(lum, 95))}
+    return gains, view[seg], stats
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -306,6 +344,9 @@ def render_region(region, tiles):
     valid = cv2.bitwise_and((wsum > 1e-4).view(np.uint8), (cov_f >= 0.5).view(np.uint8))
     inv = cv2.divide(1.0, cv2.max(wsum, 1e-6))
     out = cv2.multiply(acc, cv2.merge([inv, inv, inv]))
+    look = c.get("look")
+    if look:
+        out = apply_look(out, look)
     rgb = cv2.cvtColor(cv2.convertScaleAbs(out), cv2.COLOR_BGR2RGB)
     alpha = cv2.multiply(valid, 255)
     rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
@@ -372,6 +413,38 @@ def prepare_item(plan, a, ci, r0, r1, c0, c1):
     coarse[..., 4] = U - ox
     coarse[..., 5] = V - oy
     return coarse, gi0, gj0, crop
+
+
+LOOKS = {"vivid": {"contrast": 1.15, "saturation": 1.4}, "natural": None}
+
+
+def look_params(name, stats):
+    """Global colour look for the whole mosaic (same everywhere, so it cannot create seams):
+    contrast around the mosaic's median brightness and a saturation factor."""
+    lk = LOOKS.get(name or "vivid")
+    if not lk:
+        return None
+    mid = float(stats["median_lum"]) if stats else 118.0
+    return {"mid": mid, "contrast": lk["contrast"], "saturation": lk["saturation"]}
+
+
+def apply_look(out, look):
+    """out: float32 BGR (h, w, 3), 0-255. Same arithmetic, in the same order, as the GPU kernel."""
+    m = np.float32(look["mid"])
+    k = np.float32(look["contrast"])
+    sat = np.float32(look["saturation"])
+    b, g, r = out[..., 0], out[..., 1], out[..., 2]
+    y = (np.float32(0.114) * b + np.float32(0.587) * g) + np.float32(0.299) * r
+    y2 = m + (y - m) * k
+    # vibrance: pale colours get the full boost, strong colours less (no cartoon greens)
+    mx = np.maximum(np.maximum(b, g), r)
+    mn = np.minimum(np.minimum(b, g), r)
+    rel = (mx - mn) / np.maximum(mx, np.float32(1.0))
+    se = np.float32(1.0) + (sat - np.float32(1.0)) * (np.float32(1.0) - rel)
+    res = np.empty_like(out)
+    for c in range(3):
+        res[..., c] = y2 + se * (out[..., c] - y)
+    return np.clip(res, 0, 255)
 
 
 def _upsampler(step):
