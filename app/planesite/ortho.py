@@ -104,6 +104,26 @@ def flight_segments(times, gap_s=150.0, min_photos=40):
     return seg, cur + 1
 
 
+def _smooth_over_site(g, centres, radius):
+    """Gaussian-weighted average of per-photo values g around each photo (sigma = radius), on a
+    coarse grid so it stays fast for thousands of photos."""
+    if len(g) < 3 or radius <= 0:
+        return np.full_like(g, float(np.mean(g)) if len(g) else 0.0)
+    cell = radius / 4.0
+    x0, y0 = centres.min(0) - 3 * radius
+    nx = int((centres[:, 0].max() + 3 * radius - x0) / cell) + 1
+    ny = int((centres[:, 1].max() + 3 * radius - y0) / cell) + 1
+    ix = ((centres[:, 0] - x0) / cell).astype(int)
+    iy = ((centres[:, 1] - y0) / cell).astype(int)
+    num = np.zeros((ny, nx), np.float64)
+    den = np.zeros((ny, nx), np.float64)
+    np.add.at(num, (iy, ix), g)
+    np.add.at(den, (iy, ix), 1.0)
+    num = cv2.GaussianBlur(num, (0, 0), 4.0)
+    den = cv2.GaussianBlur(den, (0, 0), 4.0)
+    return num[iy, ix] / np.maximum(den[iy, ix], 1e-9)
+
+
 def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None, times=None):
     """Per-image RGB gains that equalise overlapping images (log-domain least squares), solved
     together with one shared viewing-angle model per channel (sun angle and vignetting). Without
@@ -190,6 +210,9 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None, times=None):
     nv = nseg * N_VIEW
     sa, sb = seg[sp_img[ia]], seg[sp_img[ib]]
     corrected = np.empty((len(sp_val), 3))
+    centres = np.array([c["C"][:2] for c in cams], np.float64)
+    foot = float(np.median([max(c["bbox"][2] - c["bbox"][0], c["bbox"][3] - c["bbox"][1]) for c in cams]))
+    smooth_r = 2.0 * foot
     for ch in range(3):
         rhs = sp_val[ib, ch] - sp_val[ia, ch]
         keep = np.ones(len(ia), bool)
@@ -210,6 +233,11 @@ def compute_gains(cams, thumbs, dsm, bounds, spacing, log=None, times=None):
             corr = g[sp_img] + (sp_f * vw[seg[sp_img]]).sum(1)       # log correction per sample
             res = corr[ia] - corr[ib] - rhs
             keep = np.abs(res) < (0.12 if it else 0.25)
+        # only even out differences between nearby photos: the slow part of the correction across
+        # the site (wider than a few photo footprints) comes from model error, not from the
+        # camera, and shows up as patches
+        g = g - _smooth_over_site(g, centres, smooth_r)
+        corr = g[sp_img] + (sp_f * vw[seg[sp_img]]).sum(1)
         # keep the mosaic as bright as the photos: the average correction over all samples is zero
         g -= corr.mean()
         corr -= corr.mean()

@@ -1008,7 +1008,9 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
         nworkers -= 2   # leave room for compressing and writing the GeoTIFF in this process
     cache_bytes = int(cache_imgs * img_bytes)
     ctx = {"cams": cams, "dsm": dsm, "x0": ox0, "y1": oy1, "gsd": gsd, "reduce": reduce, "coarse_step": 16,
-           "tau": max(0.01, 2.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
+           # blend width: each spot comes from its most straight-down photo, with a ~1-2 m feather at
+           # the boundaries (1.6.3 and earlier blended over several metres: soft, ghosted detail)
+           "tau": max(0.002, 0.5 / float(np.median([c["agl"] for c in cams]))), "edge_fade": 0.03,
            "cache_bytes": cache_bytes,
            "min_views": 2 if settings.get("trim_edges", True) else 1, "look": look,
            # JPEG mosaics: workers compress the GeoTIFF tiles themselves (tiffwriter.py)
