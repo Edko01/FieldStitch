@@ -1,8 +1,8 @@
 {
- "version": "1.6.10",
+ "version": "1.6.11",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.10.zip",
- "sha256": "6c8bd351101f6594d36c502a557336213e401ff1d20c0c03cb374676c41a6406",
- "notes": "PlaneSite 1.6.10:\n- The PlaneSite window should no longer freeze during processing. Processing now runs at below-normal priority: it still uses every idle core, but the desktop and the PlaneSite window come first, so the window keeps updating while all cores are busy. The window is also opened so the browser doesn't pause it when it's covered or in the background (this applies the next time PlaneSite starts).\n- The progress display can't get stuck any more: if one update fails, the next one still comes.\n- If the window does stop responding, PlaneSite now notes when it stopped (and any error on the page) in its log, and Save diagnostics includes that log.",
+ "app_zip": "updates/planesite-app-1.6.11.zip",
+ "sha256": "e6681262bc1ebb3af314d75e1081100cbed03be9cf680f57fa57206d6257c879",
+ "notes": "PlaneSite 1.6.11:\n- Matching no longer drops a photo pair when OpenCV's estimator trips over a nearly degenerate set of matches; it retries with a simpler method instead.\n- The log now shows the real graphics memory of NVIDIA cards (Windows reports every card with 4 GB or more as 4 GB).",
  "date": "2026-10-29"
 }

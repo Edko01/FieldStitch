@@ -65,11 +65,29 @@ def gpus():
         data = json.loads(out) if out.strip() else []
         if isinstance(data, dict):
             data = [data]
+        # Windows reports AdapterRAM as a 32-bit number, so every card with 4 GB or more shows 4 GB;
+        # NVIDIA's own tool gives the real size
+        nv = {}
+        try:
+            import shutil
+            exe = shutil.which("nvidia-smi") or r"C:\Windows\System32\nvidia-smi.exe"
+            o = subprocess.run([exe, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                               capture_output=True, text=True, timeout=10, creationflags=0x08000000).stdout
+            for line in o.splitlines():
+                nm, _, mb = line.rpartition(",")
+                if nm.strip() and mb.strip().isdigit():
+                    nv[nm.strip()] = round(int(mb) / 1024, 1)
+        except Exception:
+            pass
         res = []
         for g in data:
             ram = g.get("AdapterRAM")
-            res.append({"name": g.get("Name"), "driver": g.get("DriverVersion"),
-                        "memory_gb": round(ram / 1024 ** 3, 1) if isinstance(ram, (int, float)) and ram > 0 else None})
+            gb = round(ram / 1024 ** 3, 1) if isinstance(ram, (int, float)) and ram > 0 else None
+            if gb is not None and gb >= 3.99:
+                gb = None                    # capped value: unknown, at least 4 GB
+            name = g.get("Name")
+            gb = nv.get(name, gb)
+            res.append({"name": name, "driver": g.get("DriverVersion"), "memory_gb": gb})
         return res
     except Exception:
         return []

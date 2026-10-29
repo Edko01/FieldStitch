@@ -276,7 +276,8 @@ def _run(project_dir, prog):
     from .sysinfo import describe
     sysd = describe(project_dir, proj.get("folders") or [])
     log("System: %s | %s | %s" % (sysd.get("cpu"), sysd.get("os"),
-        "; ".join("%s (%s GB)" % (g.get("name"), g.get("memory_gb")) for g in sysd.get("gpus", [])) or "GPU: n/a"))
+        "; ".join("%s (%s)" % (g.get("name"), ("%s GB" % g["memory_gb"]) if g.get("memory_gb") else "4+ GB")
+                  for g in sysd.get("gpus", [])) or "GPU: n/a"))
     if sysd.get("photo_drives"):
         log("Photo drive type: %s | project drive: %s, %s GB free" % (", ".join(sysd["photo_drives"]),
             sysd.get("project_drive"), sysd.get("project_free_gb")))
