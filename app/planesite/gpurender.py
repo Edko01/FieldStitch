@@ -123,6 +123,13 @@ extern "C" __global__ void ps_finish(const float* acc, const float* wsum, const 
         const float se = 1.0f + (lsat - 1.0f) * (1.0f - rel);    // vibrance
         for (int c = 0; c < 3; c++) v[c] = fminf(fmaxf(y2 + se * (v[c] - y), 0.0f), 255.0f);
     }
+    {   // soft highlight shoulder above 220, one factor for all channels (ortho.highlight_rolloff)
+        const float m = fmaxf(fmaxf(v[0], v[1]), v[2]);
+        if (m > 220.0f) {
+            const float f = (220.0f + 35.0f * tanhf((m - 220.0f) / 35.0f)) / m;
+            for (int c = 0; c < 3; c++) v[c] = v[c] * f;
+        }
+    }
     for (int c = 0; c < 3; c++) {
         int q = __float2int_rn(fabsf(v[c]));
         q = min(max(q, 0), 255);

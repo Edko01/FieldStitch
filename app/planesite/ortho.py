@@ -375,6 +375,7 @@ def render_region(region, tiles):
     look = c.get("look")
     if look:
         out = apply_look(out, look)
+    out = highlight_rolloff(out)
     rgb = cv2.cvtColor(cv2.convertScaleAbs(out), cv2.COLOR_BGR2RGB)
     alpha = cv2.multiply(valid, 255)
     rgb = cv2.bitwise_and(rgb, rgb, mask=valid)
@@ -473,6 +474,27 @@ def apply_look(out, look):
     for c in range(3):
         res[..., c] = y2 + se * (out[..., c] - y)
     return np.clip(res, 0, 255)
+
+
+KNEE = 220.0
+
+
+def highlight_rolloff(out):
+    """Soft shoulder above KNEE so near-white surfaces (roofs, equipment, concrete) keep their
+    shading instead of clipping to flat white after exposure gains and contrast. The brightest
+    channel sets one factor for all three, so colours keep their hue. Same arithmetic as the GPU
+    kernel."""
+    k = np.float32(KNEE)
+    span = np.float32(255.0 - KNEE)
+    mx = out.max(axis=2)
+    hi = mx > k
+    if not hi.any():
+        return out
+    out = out.copy()
+    m = mx[hi]
+    f = (k + span * np.tanh((m - k) / span)) / m
+    out[hi] = out[hi] * f[:, None]
+    return out
 
 
 def _upsampler(step):

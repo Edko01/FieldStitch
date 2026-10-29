@@ -720,7 +720,12 @@ def _tile_dataset(path, mt):
     return loc.ds
 
 
-def tile_png(z, x, y):
+_TILE_BUSY = [0]          # tiles being built for the screen right now
+_LAST_TILE = [0.0]        # when the screen last asked for a tile
+_TILE_BUSY_LOCK = threading.Lock()
+
+
+def tile_png(z, x, y, prefetch=False):
     """Encoded map tile (bytes, content type) or None when the tile is empty. Fully covered tiles
     are JPEG (small and quick to make), tiles on the edge of the mosaic PNG with transparency."""
     path = S.ortho_path()
@@ -732,7 +737,18 @@ def tile_png(z, x, y):
     hit = TILES.get(key)
     if hit is not None:
         return hit if hit[0] else None
-    res = _make_tile(path, mt, z, x, y)
+    if prefetch and _TILE_BUSY[0] > 0:
+        return "busy"          # the screen comes first; the browser will ask again when needed
+    if not prefetch:
+        _LAST_TILE[0] = time.time()
+        with _TILE_BUSY_LOCK:
+            _TILE_BUSY[0] += 1
+    try:
+        res = _make_tile(path, mt, z, x, y)
+    finally:
+        if not prefetch:
+            with _TILE_BUSY_LOCK:
+                _TILE_BUSY[0] -= 1
     TILES.put(key, res or (b"", ""))
     return res
 
@@ -810,12 +826,13 @@ def warm_tiles(bounds_local, maxz):
         for z, x, y in part:
             if _WARM["key"] != key or S.ortho_path() != path:
                 return
+            while _TILE_BUSY[0] > 0 or time.time() - _LAST_TILE[0] < 0.4:
+                time.sleep(0.05)       # the screen is loading tiles: step aside
             try:
-                tile_png(z, x, y)
+                tile_png(z, x, y, prefetch=True)
             except Exception:
                 return
-    for k in range(2):
-        threading.Thread(target=run, args=(jobs[k::2],), daemon=True).start()
+    threading.Thread(target=run, args=(jobs,), daemon=True).start()
 
 
 def _empty_png():
@@ -865,7 +882,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, self.api_get(path, q))
             m = re.match(r"^/tiles/(\d+)/(-?\d+)/(-?\d+)\.png$", path)
             if m:
-                res = tile_png(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                pf = "pf" in q
+                res = tile_png(int(m.group(1)), int(m.group(2)), int(m.group(3)), prefetch=pf)
+                if res == "busy":
+                    return self._send(503, b"", "text/plain", {"Cache-Control": "no-store"})
                 data, ctype = res or (EMPTY_PNG, "image/png")
                 # the URL carries the ortho's modification time, so a tile never changes
                 return self._send(200, data, ctype, {"Cache-Control": "max-age=31536000, immutable"})
@@ -955,7 +975,9 @@ class Handler(BaseHTTPRequestHandler):
                 b = ds.bounds
                 gsd = ds.res[0]
             _, e0, n0 = S.origin
-            maxz = int(math.ceil(math.log2(R0 / gsd)))
+            # finest tile level: no finer than the mosaic itself (allowing ~1.2x); beyond that the
+            # browser enlarges the last level instead of the server making upsampled tiles
+            maxz = int(math.floor(math.log2(R0 / gsd) + 0.27))
             rep = dict(rep)
             cams = rep.pop("cam_positions", [])
             warm_tiles((b.left - e0, b.bottom - n0, b.right - e0, b.top - n0), maxz)

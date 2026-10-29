@@ -595,18 +595,31 @@ async function loadResult(fit) {
   }
 }
 
-// Leaflet picks tiles at the nearest zoom level (Math.round) and ignores display scaling, so the
-// ortho was often drawn from tiles up to 1.4x coarser than the screen and stretched (twice, on a
-// scaled Windows display): soft detail. This layer always loads tiles at least as sharp as the
-// screen's real pixels and lets the browser shrink them slightly instead.
-const CrispTileLayer = L.TileLayer.extend({
-  _setView(center, zoom, noPrune, noUpdate) {
-    const o = this.options;
-    const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
-    let tz = Math.ceil(zoom + Math.log2(dpr) - 0.1);
-    tz = (o.maxZoom !== undefined && tz > o.maxZoom) || (o.minZoom !== undefined && tz < o.minZoom) ? undefined : this._clampZoom(tz);
-    const changed = o.updateWhenZooming && tz !== this._tileZoom;
-    if (!noUpdate || changed) {
+// The ortho is drawn by two tile layers in one pane:
+//  * a quick layer (Leaflet's usual nearest zoom level), so panning and zooming respond at once;
+//  * a sharp layer on top with tiles at least as detailed as the screen's real pixels (including
+//    Windows display scaling). It only switches level once zooming pauses, so it never slows the
+//    zoom down; until then the quick layer shows through.
+function sharpZoom(layer, zoom) {
+  const o = layer.options;
+  const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+  // finer tiles only when the stretch would be visible (over ~1.2x): each finer level is 4x the tiles
+  const tz = Math.ceil(zoom + Math.log2(dpr) - 0.27);
+  return (o.maxZoom !== undefined && tz > o.maxZoom) || (o.minZoom !== undefined && tz < o.minZoom) ? undefined : layer._clampZoom(tz);
+}
+const SharpTileLayer = L.TileLayer.extend({
+  _setView(center, zoom, noPrune, noUpdate, now) {
+    const tz = sharpZoom(this, zoom);
+    if (!now && tz !== this._tileZoom) {
+      clearTimeout(this._deferT);
+      this._deferT = setTimeout(() => {
+        this._deferT = 0;
+        if (this._map) this._setView(this._map.getCenter(), this._map.getZoom(), false, false, true);
+      }, 280);
+      this._setZoomTransforms(center, zoom);
+      return;
+    }
+    if (!noUpdate || now) {
       this._tileZoom = tz;
       if (this._abortLoading) this._abortLoading();
       this._updateLevels();
@@ -617,30 +630,43 @@ const CrispTileLayer = L.TileLayer.extend({
     }
     this._setZoomTransforms(center, zoom);
   },
+  _onMoveEnd() {
+    if (this._deferT) return;          // a level change is pending; it loads the new view itself
+    L.TileLayer.prototype._onMoveEnd.call(this);
+  },
+  onRemove(map) {
+    clearTimeout(this._deferT);
+    this._deferT = 0;
+    L.TileLayer.prototype.onRemove.call(this, map);
+  },
 });
 
 function drawOrtho() {
   if (!map || !result) return;
   if (layers.ortho) layers.ortho.remove();
   const b = result.bounds;
-  layers.ortho = new CrispTileLayer("/tiles/{z}/{x}/{y}.png?v=" + result.mtime, {
-    tileSize: 256, minNativeZoom: 0, maxNativeZoom: result.max_native_zoom, minZoom: -4, maxZoom: 22,
-    noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 6, updateWhenZooming: false, updateInterval: 60,
-    opacity: +$("lyrOrthoOp").value,
-  });
+  const url = "/tiles/{z}/{x}/{y}.png?v=" + result.mtime;
+  const opts = {
+    tileSize: 256, minNativeZoom: 0, maxNativeZoom: result.max_native_zoom, minZoom: -4, maxZoom: 22, pane: "ortho",
+    noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 3, updateWhenZooming: false, updateInterval: 60,
+  };
+  const quick = L.tileLayer(url, Object.assign({ zIndex: 1 }, opts));
+  const sharp = new SharpTileLayer(url, Object.assign({ zIndex: 2 }, opts));
+  layers.ortho = L.layerGroup([quick, sharp]);
+  layers.orthoQuick = quick;
+  map.getPane("ortho").style.opacity = +$("lyrOrthoOp").value;
   if ($("lyrOrtho").checked) layers.ortho.addTo(map);
-  layers.ortho.bringToBack();
-  map.setMaxZoom(result.max_native_zoom + 3);
+  map.setMaxZoom(result.max_native_zoom + 4);
   prefetch.seen = new Set();
   prefetch.queue = [];
-  layers.ortho.on("load", () => { clearTimeout(prefetch.timer); prefetch.timer = setTimeout(prefetchTiles, 150); });
+  quick.on("load", () => { clearTimeout(prefetch.timer); prefetch.timer = setTimeout(prefetchTiles, 150); });
 }
 
 // While the map is idle, fetch the tiles just outside the view and the next zoom level in, so
 // panning and zooming in show finished tiles straight away (tiles are cached by the browser).
 const prefetch = { seen: new Set(), queue: [], active: 0, timer: 0 };
 function prefetchTiles() {
-  const lyr = layers.ortho;
+  const lyr = layers.orthoQuick;
   if (!lyr || !map.hasLayer(lyr) || lyr._tileZoom === undefined) return;
   const z = lyr._tileZoom, maxz = result.max_native_zoom, b = map.getBounds();
   const want = [];
@@ -654,20 +680,19 @@ function prefetchTiles() {
         if (lyr._isValidTile(coords)) want.push("/tiles/" + zz + "/" + x + "/" + y + ".png?v=" + result.mtime);
       }
   };
-  range(z, 2, 1);                       // a ring of tiles around the view
-  if (z + 1 <= maxz) range(z + 1, 0, 0.6);  // the middle of the view, one level sharper
-  prefetch.queue = want.filter(u => !prefetch.seen.has(u)).slice(0, 120);
+  range(z, 1, 1);                       // a ring of tiles around the view
+  prefetch.queue = want.filter(u => !prefetch.seen.has(u)).slice(0, 60);
   pumpPrefetch();
 }
 function pumpPrefetch() {
-  while (prefetch.active < 3 && prefetch.queue.length) {
+  while (prefetch.active < 2 && prefetch.queue.length) {
     const u = prefetch.queue.shift();
     prefetch.seen.add(u);
     prefetch.active++;
     const img = new Image();
     img.fetchPriority = "low";
     img.onload = img.onerror = () => { prefetch.active--; pumpPrefetch(); };
-    img.src = u;
+    img.src = u + "&pf=1";     // warms the app's tile cache; the server skips it when busy
   }
 }
 
@@ -678,6 +703,7 @@ function initMap() {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   L.control.scale({ position: "bottomright", imperial: true, metric: true }).addTo(map);
   map.setView([0, 0], 2);
+  map.createPane("ortho").style.zIndex = 150;   // below the areas and markers
   layers.areas = L.layerGroup().addTo(map);
   map.on("mousedown", onMapDown);
   map.on("mousemove", onMapMove);
@@ -1103,8 +1129,8 @@ function wire() {
   // layers
   $("btnFit").onclick = fitJob;
   $("lyrCams").onchange = () => { if (layers.cams) $("lyrCams").checked ? layers.cams.addTo(map) : layers.cams.remove(); };
-  $("lyrOrtho").onchange = () => { if (layers.ortho) { $("lyrOrtho").checked ? layers.ortho.addTo(map) : layers.ortho.remove(); if ($("lyrOrtho").checked) layers.ortho.bringToBack(); } };
-  $("lyrOrthoOp").oninput = () => { if (layers.ortho) layers.ortho.setOpacity(+$("lyrOrthoOp").value); };
+  $("lyrOrtho").onchange = () => { if (layers.ortho) { $("lyrOrtho").checked ? layers.ortho.addTo(map) : layers.ortho.remove(); } };
+  $("lyrOrthoOp").oninput = () => { if (map) map.getPane("ortho").style.opacity = +$("lyrOrthoOp").value; };
   $("lyrAreas").onchange = () => { $("lyrAreas").checked ? layers.areas.addTo(map) : layers.areas.remove(); };
 
   // areas
