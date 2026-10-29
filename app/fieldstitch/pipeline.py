@@ -994,7 +994,9 @@ def write_orthomosaic(path, cams, dsm, origin, epsg, ox0, oy1, gsd, out_w, out_h
     ctx_file = os.path.join(work, "render_ctx.pkl")
     with open(ctx_file, "wb") as f:
         pickle.dump(ctx, f)
-    n_gpu_r = 1 if (gpu_wanted(settings) and len(groups) >= 8) else 0
+    # GPU rendering is experimental: it ran at ~10% GPU load and cost CPU workers in tests, so it
+    # is off unless FIELDSTITCH_GPU_RENDER=1
+    n_gpu_r = 1 if (os.environ.get("FIELDSTITCH_GPU_RENDER") == "1" and gpu_wanted(settings) and len(groups) >= 8) else 0
     gpu_threads = 8
     if n_gpu_r:
         # the GPU worker's decode threads need CPU time too

@@ -162,6 +162,7 @@ def _derivs(xp, D, l, r, c):
 # a few dozen large array operations instead of thousands of small per-octave ones, which is what
 # makes the GPU worthwhile (each operation costs ~10-20 us of Python/launch overhead).
 
+USE_CUDA_KERNELS = [True]   # hand-written CUDA kernels where array operations are slow on GPUs
 ORI_R_MAX = int(round(ORI_RADIUS * SIGMA * 2.0 ** ((N_LAYERS + 0.5) / N_LAYERS)))   # 16
 
 
@@ -402,6 +403,12 @@ def describe(state, kps, sel, budget=2.5e6, timings=None):
     cols = A.cols_h[o]
     rad = np.rint(D_SCL * scl * 1.4142135623730951 * (D_WIDTH + 1) * 0.5).astype(np.int64)
     rad = np.minimum(rad, np.sqrt(rows * rows + cols * cols).astype(np.int64))
+    if xp is not np and USE_CUDA_KERNELS[0]:
+        desc[:] = to_host(xp, _descr_cuda(xp, A, o, li, px, py, scl, ang, rad))
+        if timings is not None:
+            xp.cuda.Stream.null.synchronize()
+            timings["describe"] = timings.get("describe", 0.0) + _t.perf_counter() - t0
+        return desc
     order = np.argsort(rad, kind="stable")
     outs = []
     s0 = 0
@@ -420,6 +427,100 @@ def describe(state, kps, sel, budget=2.5e6, timings=None):
     if timings is not None:
         timings["describe"] = timings.get("describe", 0.0) + _t.perf_counter() - t0
     return desc
+
+
+_DESC_SRC = r"""
+extern "C" __global__ void sift_desc(const float* MAG, const float* ANG, const long long* gofs,
+        const int* rows, const int* cols, const float* px, const float* py, const float* scl,
+        const float* ori, const int* rad, float* out, const int n)
+{
+    // one block per keypoint; 4x4 spatial x 8 orientation bins (+ borders) histogram in shared memory
+    const int k = blockIdx.x;
+    if (k >= n) return;
+    __shared__ float hist[360];
+    for (int i = threadIdx.x; i < 360; i += blockDim.x) hist[i] = 0.f;
+    __syncthreads();
+    const float hist_width = 3.0f * scl[k];
+    const float orik = ori[k];
+    const float t = orik * 0.017453292519943295f;
+    const float cos_t = cosf(t) / hist_width;
+    const float sin_t = sinf(t) / hist_width;
+    const int R = rad[k];
+    const int W = 2 * R + 1;
+    const int pr = (int)rintf(py[k]);
+    const int pc = (int)rintf(px[k]);
+    const int nr = rows[k];
+    const int nc = cols[k];
+    const long long base = gofs[k];
+    for (int s = threadIdx.x; s < W * W; s += blockDim.x) {
+        const int i = s / W - R;
+        const int j = s % W - R;
+        const float c_rot = j * cos_t - i * sin_t;
+        const float r_rot = j * sin_t + i * cos_t;
+        const float rbin = r_rot + 1.5f;
+        const float cbin = c_rot + 1.5f;
+        const int y = pr + i;
+        const int x = pc + j;
+        if (rbin > -1.f && rbin < 4.f && cbin > -1.f && cbin < 4.f && y > 0 && y < nr - 1 && x > 0 && x < nc - 1) {
+            const long long gi = base + (long long)y * nc + x;
+            const float w = expf((c_rot * c_rot + r_rot * r_rot) * (-1.0f / 8.0f));
+            const float m = MAG[gi] * w;
+            const float obin = (ANG[gi] - orik) * (8.0f / 360.0f);
+            const float fr0 = floorf(rbin), fc0 = floorf(cbin), fo0 = floorf(obin);
+            const float rb = rbin - fr0, cb = cbin - fc0, ob = obin - fo0;
+            const int r0 = (int)fr0, c0 = (int)fc0;
+            int o0 = (int)fo0;
+            if (o0 < 0) o0 += 8;
+            if (o0 >= 8) o0 -= 8;
+            const float v_r1 = m * rb, v_r0 = m - v_r1;
+            const float v_rc11 = v_r1 * cb, v_rc10 = v_r1 - v_rc11;
+            const float v_rc01 = v_r0 * cb, v_rc00 = v_r0 - v_rc01;
+            const float v111 = v_rc11 * ob, v110 = v_rc11 - v111;
+            const float v101 = v_rc10 * ob, v100 = v_rc10 - v101;
+            const float v011 = v_rc01 * ob, v010 = v_rc01 - v011;
+            const float v001 = v_rc00 * ob, v000 = v_rc00 - v001;
+            const int idx = ((r0 + 1) * 6 + c0 + 1) * 10 + o0;
+            atomicAdd(&hist[idx], v000);
+            atomicAdd(&hist[idx + 1], v001);
+            atomicAdd(&hist[idx + 10], v010);
+            atomicAdd(&hist[idx + 11], v011);
+            atomicAdd(&hist[idx + 60], v100);
+            atomicAdd(&hist[idx + 61], v101);
+            atomicAdd(&hist[idx + 70], v110);
+            atomicAdd(&hist[idx + 71], v111);
+        }
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < 360; i += blockDim.x) out[(long long)k * 360 + i] = hist[i];
+}
+"""
+_KERNELS = {}
+
+
+def _desc_kernel(xp):
+    if "desc" not in _KERNELS:
+        _KERNELS["desc"] = xp.RawKernel(_DESC_SRC, "sift_desc")
+    return _KERNELS["desc"]
+
+
+def _descr_cuda(xp, A, o, li, px, py, scl, ori, rad):
+    """Descriptors with one CUDA block per keypoint (shared-memory histogram). Inputs are host arrays."""
+    n = len(px)
+    gofs = (A.gbase_h[o] + (li - 1) * A.rows_h[o] * A.cols_h[o]).astype(np.int64)
+    args = [xp.asarray(gofs), xp.asarray(A.rows_h[o].astype(np.int32)), xp.asarray(A.cols_h[o].astype(np.int32)),
+            xp.asarray(px.astype(np.float32)), xp.asarray(py.astype(np.float32)), xp.asarray(scl.astype(np.float32)),
+            xp.asarray(ori.astype(np.float32)), xp.asarray(rad.astype(np.int32))]
+    out = xp.zeros((n, 360), xp.float32)
+    _desc_kernel(xp)((n,), (128,), (A.MAG, A.ANG, *args, out, np.int32(n)))
+    d, nb = D_WIDTH, D_BINS
+    hist = out.reshape(n, d + 2, d + 2, nb + 2)
+    hist[..., 0] += hist[..., nb]
+    hist[..., 1] += hist[..., nb + 1]
+    dst = hist[:, 1:d + 1, 1:d + 1, :nb].reshape(n, d * d * nb)
+    nrm = xp.sqrt((dst * dst).sum(1, keepdims=True))
+    dst = xp.minimum(dst, nrm * D_MAG_THR)
+    nrm = xp.sqrt((dst * dst).sum(1, keepdims=True))
+    return dst * (512.0 / xp.maximum(nrm, 1e-7))
 
 
 def _descr_flat(xp, A, o, li, px, py, scl, ori, rad, R):

@@ -1,8 +1,8 @@
 {
- "version": "1.5.4",
+ "version": "1.5.5",
  "runtime": 2,
- "app_zip": "updates/fieldstitch-app-1.5.4.zip",
- "sha256": "14b8f59d09f4eacb8b49d4d0a74f6e1e5039753969d57e1052ad9c26f8018c53",
- "notes": "FieldStitch 1.5.4 - more work on the NVIDIA graphics card:\n- Rendering: a GPU worker now warps and blends photos on the card alongside the CPU workers. Its first block is rendered on both and compared before the card is trusted; any problem falls back to the CPU.\n- Feature detection on the card restructured to do each photo in a few large steps instead of thousands of small ones, and the processes feeding the card get priority so they aren't starved when the CPU is busy.\n- The log now records a short GPU benchmark at the start, how busy the card was during features and rendering, and why Windows refused the background-throttling setting if it does.",
+ "app_zip": "updates/fieldstitch-app-1.5.5.zip",
+ "sha256": "9dea7cab6ff30ee5d3d4e53e7fd68fdc8831126cfbe912d93138778fe0914efe",
+ "notes": "FieldStitch 1.5.5 - faster feature detection on the graphics card:\n- The descriptor step (about three quarters of the card's time per photo in 1.5.4) now runs as a dedicated GPU kernel, the way GPU versions of this detector normally do it. The card's results are still checked against the CPU before each job.\n- Rendering on the graphics card is switched off again: in 1.5.4 it kept the card only about 10% busy and took workers away from the CPU, so the job was slower overall.",
  "date": "2026-10-28"
 }
