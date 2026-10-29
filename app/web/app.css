@@ -259,7 +259,11 @@ details.more summary { cursor: pointer; color: var(--crop); font-weight: 600; pa
 .gridsize input, .gridcount input { width: 90px; }
 .arealist-head { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; font-size: 13px; color: var(--ink-2); }
 .arealist { list-style: none; margin: 4px 0 0; padding: 0; max-height: calc(100vh - 470px); min-height: 80px; overflow-y: auto; }
-.arealist li { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--line-2); }
+.arealist li { display: grid; grid-template-columns: 1fr auto auto auto; align-items: center; gap: 6px; padding: 4px 2px; border-bottom: 1px solid var(--line-2); }
+.arealist .send { border: 0; background: none; color: var(--ink-3); width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; }
+.arealist .send svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.arealist .send:hover, .arealist .send:focus-visible { color: var(--ink); background: var(--line-2); }
+.arealist .send.sent { color: #3C7A4E; }
 .arealist li.focus { background: #FBF1CF; }
 .arealist input[type=text] { height: 28px; border-color: transparent; background: transparent; padding: 0 6px; width: 100%; }
 .arealist input[type=text]:hover, .arealist input[type=text]:focus { border-color: var(--line); background: #fff; }
@@ -463,3 +467,16 @@ dialog.modal .bar { margin: 4px 0 12px; }
 @media (max-width: 900px) { .starts { grid-template-columns: 1fr; } .topbtn { padding: 0 8px; } }
 .topbar .namewrap { flex: 0 1 auto; }
 .topbar .namewrap .projname { flex: 0 1 auto; field-sizing: content; min-width: 60px; max-width: 460px; }
+
+/* send to Pilot 2 */
+.p2grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 12px; margin: 10px 0 6px; }
+.p2grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-2); }
+.p2grid input { width: 100%; }
+.p2grid small { font-size: 12px; }
+.p2notes { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
+.p2notes:empty { display: none; }
+.p2conn { margin-top: 12px; border-top: 1px solid var(--line-2); padding-top: 8px; }
+.p2conn summary { cursor: pointer; font-size: 14px; }
+.p2conn label { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+.p2ok { margin: 10px 0 0 !important; padding: 10px 12px; border-radius: var(--radius-s); background: #E5F2E8; color: #1F4D2C; font-size: 13px; }
+@media (max-width: 640px) { .p2grid { grid-template-columns: repeat(2, 1fr); } }
