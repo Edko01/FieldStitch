@@ -225,11 +225,281 @@ def safe_filename(s):
     return s or "area"
 
 
+def _gdal_metadata(items):
+    # GDAL escapes item values twice (its own escaping, then the XML writer's)
+    xml = "<GDALMetadata>\n" + "".join('  <Item name="%s">%s</Item>\n' % (k, _xml_escape(_xml_escape(v)))
+                                        for k, v in items.items()) + "</GDALMetadata>\n"
+    raw = xml.encode("utf-8") + b"\0"
+    return {42112: (2, len(raw), raw)}
+
+
+def _jpeg_quality_of(tables, hint):
+    """The cv2 JPEG quality whose quantisation tables are exactly the file's JPEGTables, or None."""
+    import cv2
+    from .tiffwriter import _split_jpeg
+    img = np.zeros((16, 16, 3), np.uint8)
+    for q in [int(hint)] + list(range(100, 0, -1)):
+        ok, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, q, cv2.IMWRITE_JPEG_OPTIMIZE, 1])
+        dqt, _ = _split_jpeg(enc.tobytes())
+        if b"\xff\xd8" + dqt + b"\xff\xd9" == tables:
+            return q
+    return None
+
+
+def _read_clipped(d, x, y, w, h):
+    """RGB and mask of the window, zero outside the image. (A boundless read goes through a VRT
+    of the file, which loses the overview level the dataset was opened at.)"""
+    from rasterio.windows import Window
+    rgb = np.zeros((3, h, w), np.uint8)
+    m = np.zeros((h, w), bool)
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(d.width, x + w), min(d.height, y + h)
+    if x1 > x0 and y1 > y0:
+        win = Window(x0, y0, x1 - x0, y1 - y0)
+        rgb[:, y0 - y:y1 - y, x0 - x:x1 - x] = d.read([1, 2, 3], window=win)
+        m[y0 - y:y1 - y, x0 - x:x1 - x] = d.read_masks(1, window=win) > 127
+    return rgb, m
+
+
+def _threads():
+    return max(2, min(16, (os.cpu_count() or 4)))
+
+
+def _export_area_fast(ortho_path, area, out_path, jpeg_quality, progress, overviews):
+    """Area export without recompressing the inside of the field: the output is aligned to the
+    orthomosaic's 512-pixel tiles, tiles wholly inside the field are copied byte for byte, only
+    tiles on the field edge are decoded, cut and compressed again (in parallel), and overviews
+    are cut from the orthomosaic's own overviews. Returns None when the file isn't suitable."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.features import geometry_mask, rasterize
+    from rasterio.transform import Affine
+    from rasterio.windows import Window
+    from . import tiffcopy
+    from .tiffwriter import JpegTiffWriter, encode_tiles
+    T = 512
+    img, msk, tile = tiffcopy.tile_index(ortho_path)
+    comp = img.entries.get(259)
+    if tile != T or msk is None or comp is None or comp[2][:2] != b"\x07\x00" or 347 not in img.entries:
+        return None
+    q = _jpeg_quality_of(img.entries[347][2], jpeg_quality)
+    if q is None:
+        return None
+    label = area["name"]
+    geom = {"type": "Polygon", "coordinates": area["rings"]}
+    with rasterio.open(ortho_path) as src:
+        W, H = src.width, src.height
+        crs, str_ = src.crs, src.transform
+        ovs = src.overviews(1)
+    inv = ~str_
+    pts = np.array([p for ring in area["rings"] for p in ring], float)
+    cols, rows = inv * (pts[:, 0], pts[:, 1])
+    c0 = max(0, int(math.floor(min(cols) / T)) * T)
+    r0 = max(0, int(math.floor(min(rows) / T)) * T)
+    c1 = min(W, int(math.ceil(max(cols) / T)) * T)
+    r1 = min(H, int(math.ceil(max(rows) / T)) * T)
+    if c1 <= c0 or r1 <= r0:
+        raise ValueError("Area '%s' does not overlap the orthomosaic" % label)
+    Wo, Ho = c1 - c0, r1 - r0
+    tr = str_ * Affine.translation(c0, r0)
+    ntx, nty = (Wo + T - 1) // T, (Ho + T - 1) // T
+    src_ntx = (W + T - 1) // T
+    # which tiles are wholly inside the field: not crossed by its outline, centre inside
+    tgrid = tr * Affine.scale(T)
+    lines = [{"type": "LineString", "coordinates": ring} for ring in area["rings"]]
+    edge = rasterize([(g, 1) for g in lines], out_shape=(nty, ntx), transform=tgrid, all_touched=True,
+                     dtype="uint8") > 0
+    centre = geometry_mask([geom], out_shape=(nty, ntx), transform=tgrid, invert=True)
+    shared = {}
+    for o in img.offsets:
+        shared[o] = shared.get(o, 0) + 1
+    tls = threading.local()
+
+    def ds():
+        d = getattr(tls, "ds", None)
+        if d is None:
+            d = tls.ds = rasterio.open(ortho_path)
+        return d
+
+    tmp_files = []
+    nthreads = _threads()
+    level_list = []
+    f = 2
+    while overviews and max(Wo, Ho) / f >= 256:
+        level_list.append(f)
+        f *= 2
+    # rough work shares for the progress bar
+    w_main = 0.5 if level_list else 0.9
+    w_lvl = 0.4 if level_list else 0.0
+    any_data = [False]
+    try:
+        main_tmp = out_path + ".main.part"
+        tmp_files.append(main_tmp)
+        wr = JpegTiffWriter(main_tmp, Wo, Ho, crs, tr, q)
+        copy, cut = [], []
+        for ty in range(nty):
+            for tx in range(ntx):
+                if edge[ty, tx]:
+                    cut.append((tx, ty))
+                elif centre[ty, tx]:
+                    copy.append((tx, ty))
+        ntiles = max(1, len(copy) + len(cut))
+        done = [0]
+        # 1) tiles inside the field: copy the compressed bytes (in file order)
+        keys = []
+        for tx, ty in copy:
+            k = (r0 // T + ty) * src_ntx + (c0 // T + tx)
+            if img.counts[k] and shared[img.offsets[k]] == 1:
+                keys.append((img.offsets[k], k, tx, ty))
+        keys.sort()
+        with open(ortho_path, "rb") as fh:
+            batch = []
+            for o, k, tx, ty in keys:
+                fh.seek(o)
+                jb = fh.read(img.counts[k])
+                fh.seek(msk.offsets[k])
+                mb = fh.read(msk.counts[k])
+                batch.append((tx, ty, jb, mb))
+                if len(batch) >= 64:
+                    wr.write_tiles(batch, None)
+                    done[0] += len(batch)
+                    batch = []
+                    if progress:
+                        progress(w_main * done[0] / ntiles)
+            wr.write_tiles(batch, None)
+            done[0] += len(batch)
+        any_data[0] = bool(keys)
+
+        # 2) tiles on the field edge: decode, cut along the outline, compress again
+        def cut_tile(t):
+            tx, ty = t
+            d = ds()
+            rgb, m = _read_clipped(d, c0 + tx * T, r0 + ty * T, T, T)
+            inside = geometry_mask([geom], out_shape=(T, T), transform=tr * Affine.translation(tx * T, ty * T),
+                                   invert=True)
+            a = m & inside
+            if not a.any():
+                return [], None
+            rgb[:, ~a] = 0
+            return encode_tiles((tx * T, ty * T, T, T), rgb.transpose(1, 2, 0), a.astype(np.uint8) * 255, q)
+
+        with ThreadPoolExecutor(nthreads) as ex:
+            for tiles, dqt in ex.map(cut_tile, cut):
+                if tiles:
+                    wr.write_tiles(tiles, dqt)
+                    any_data[0] = True
+                done[0] += 1
+                if progress and done[0] % 16 == 0:
+                    progress(w_main * done[0] / ntiles)
+        wr.close()
+        if not any_data[0]:
+            raise ValueError("Area '%s' contains no orthomosaic data" % label)
+
+        # 3) overviews, cut from the orthomosaic's overviews (the output starts on a tile corner,
+        #    so its overview pixels are exactly the orthomosaic's)
+        level_tmps = []
+        for li, f in enumerate(level_list):
+            wf, hf = (Wo + f - 1) // f, (Ho + f - 1) // f
+            tmp = out_path + ".ov%d.part" % f
+            tmp_files.append(tmp)
+            level_tmps.append(tmp)
+            lw = JpegTiffWriter(tmp, wf, hf, crs, tr * Affine.scale(f), q)
+            CH = 2048
+            chunks = [(x, y) for y in range(0, hf, CH) for x in range(0, wf, CH)]
+            lvl = ovs.index(f) if f in ovs else None
+
+            def cut_chunk(c, f=f, wf=wf, hf=hf, lvl=lvl):
+                x, y = c
+                cw, chh = min(CH, wf - x), min(CH, hf - y)
+                if lvl is not None:
+                    d = getattr(tls, "ov%d" % f, None)
+                    if d is None:
+                        d = rasterio.open(ortho_path, overview_level=lvl)
+                        setattr(tls, "ov%d" % f, d)
+                    rgb, m = _read_clipped(d, c0 // f + x, r0 // f + y, cw, chh)
+                else:
+                    d = ds()
+                    win = Window(c0 + x * f, r0 + y * f, cw * f, chh * f)
+                    rgb = d.read([1, 2, 3], window=win, out_shape=(3, chh, cw), boundless=True,
+                                 resampling=Resampling.average)
+                    m = d.read_masks(1, window=win, out_shape=(chh, cw), boundless=True) > 127
+                inside = geometry_mask([geom], out_shape=(chh, cw),
+                                       transform=tr * Affine.scale(f) * Affine.translation(x, y), invert=True)
+                a = m & inside
+                if not a.any():
+                    return [], None
+                rgb[:, ~a] = 0
+                return encode_tiles((x, y, cw, chh), rgb.transpose(1, 2, 0), a.astype(np.uint8) * 255, q)
+
+            with ThreadPoolExecutor(nthreads) as ex:
+                for i, (tiles, dqt) in enumerate(ex.map(cut_chunk, chunks)):
+                    if tiles:
+                        lw.write_tiles(tiles, dqt)
+                    if progress:
+                        share = 0.75 if li == 0 else 0.25 / max(1, len(level_list) - 1)
+                        base = 0 if li == 0 else 0.75 + 0.25 * (li - 1) / max(1, len(level_list) - 1)
+                        progress(w_main + w_lvl * (base + share * (i + 1) / len(chunks)))
+            lw.close()
+
+        # 4) one GeoTIFF with internal overviews
+        res = tiffcopy.merge(main_tmp, level_tmps, out_path,
+                             progress=(lambda p: progress(w_main + w_lvl + (1 - w_main - w_lvl) * p)) if progress else None,
+                             extra_tags=_gdal_metadata({"AREA_NAME": area["name"]}))
+    finally:
+        for p_ in tmp_files:
+            try:
+                os.remove(p_)
+            except OSError:
+                pass
+        for k in list(vars(tls)):
+            try:
+                getattr(tls, k).close()
+            except Exception:
+                pass
+    return {"path": out_path, "width": Wo, "height": Ho, "fast": True, "bytes": res["bytes"]}
+
+
 def export_area(ortho_path, area, out_path, compression="same", jpeg_quality=90, progress=None,
                 scale=1.0, overviews=True):
     """Write the part of the orthomosaic inside area's polygon to out_path (GeoTIFF).
     area=None exports the whole orthomosaic. scale < 1 writes a coarser copy (e.g. 0.5 = half the pixels
-    on each side)."""
+    on each side).
+
+    At full resolution in the orthomosaic's own compression the tiles are copied without
+    recompressing (fast, no extra JPEG loss): the whole orthomosaic as is, an area cut on the
+    orthomosaic's 512-pixel tile grid (the extra margin is transparent)."""
+    scale = float(scale or 1.0)
+    if scale >= 0.999 and compression in ("same", None) and not os.environ.get("PLANESITE_SLOW_EXPORT"):
+        from . import tiffcopy
+        try:
+            if area is None:
+                r = tiffcopy.merge_with_overviews(ortho_path, out_path, progress, overviews)
+                return {"path": out_path, "fast": True, "bytes": r["bytes"]}
+            r = _export_area_fast(ortho_path, area, out_path, jpeg_quality, progress, overviews)
+            if r is not None:
+                return r
+        except ValueError as e:
+            if "no orthomosaic data" in str(e) or "does not overlap" in str(e):
+                raise
+            _log_fast_fail(e)
+        except Exception as e:      # anything unexpected: fall back to the plain export
+            _log_fast_fail(e)
+    return _export_area_gdal(ortho_path, area, out_path, compression, jpeg_quality, progress, scale, overviews)
+
+
+FAST_FAILURES = []     # reasons the fast export wasn't used (shown in diagnostics)
+
+
+def _log_fast_fail(e):
+    import sys
+    FAST_FAILURES.append("%s: %s" % (type(e).__name__, e))
+    print("fast export not used: %s" % e, file=sys.stderr)
+
+
+def _export_area_gdal(ortho_path, area, out_path, compression="same", jpeg_quality=90, progress=None,
+                      scale=1.0, overviews=True):
     import rasterio
     from rasterio.enums import Resampling, ColorInterp
     from rasterio.features import geometry_mask
