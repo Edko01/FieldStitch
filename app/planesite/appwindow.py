@@ -60,13 +60,23 @@ def _browser_candidates():
     return seen
 
 
+# The window is a browser page; keep the browser from pausing or slowing it when it is covered,
+# in the background or the computer is busy processing (Edge's efficiency mode / tab freezing).
+WINDOW_FLAGS = [
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-features=Translate,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+]
+
+
 def open_window(url):
     """Open url as a standalone app window. Returns the browser Popen (or None if a normal tab was used)."""
     profile = os.path.join(data_dir(), "window")
     for exe in _browser_candidates():
         try:
             return subprocess.Popen([exe, "--app=" + url, "--user-data-dir=" + profile, "--window-size=1440,900",
-                                     "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"],
+                                     "--no-first-run", "--no-default-browser-check"] + WINDOW_FLAGS,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             continue

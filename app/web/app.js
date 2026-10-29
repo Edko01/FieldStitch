@@ -29,9 +29,16 @@ let nativeGsdCm = null;
 let optionsAfterScan = false;   // open Processing options when the current photo import finishes
 
 // ------------------------------------------------------------------ utils
-async function api(path, body) {
+async function api(path, body, timeoutMs) {
   const opt = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  const r = await fetch(path, opt);
+  let timer = 0;
+  if (timeoutMs) {
+    const ac = new AbortController();
+    opt.signal = ac.signal;
+    timer = setTimeout(() => ac.abort(), timeoutMs);
+  }
+  let r;
+  try { r = await fetch(path, opt); } finally { clearTimeout(timer); }
   let data = {};
   try { data = await r.json(); } catch (e) { /* empty */ }
   if (!r.ok) throw new Error(data.error || ("Request failed (" + r.status + ")"));
@@ -85,17 +92,33 @@ const busyScan = () => status && status.scan && !status.scan.finished;
 const busyExport = () => status && status.export && !status.export.finished;
 
 // ------------------------------------------------------------------ polling
+// Errors in the page go to PlaneSite's log (the window has no console to look at).
+let clientErrs = 0;
+function reportError(msg) {
+  if (clientErrs++ > 20) return;
+  try { fetch("/api/clientlog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: String(msg).slice(0, 2000) }) }); } catch (e) { /* ignore */ }
+}
+window.addEventListener("error", (e) => reportError((e.message || "error") + " at " + (e.filename || "").split("/").pop() + ":" + e.lineno));
+window.addEventListener("unhandledrejection", (e) => reportError("unhandled: " + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)));
+
 async function refresh() {
+  // whatever happens, the next refresh is scheduled: a failed request or a display error must
+  // not leave the window showing stale progress
+  let next = 3000;
   try {
-    status = await api("/api/status");
-  } catch (e) {
-    if (!updRestarting) toast("Lost contact with PlaneSite. Start it again from the Start menu or desktop icon.");
-    schedule(4000);
-    return;
+    try {
+      status = await api("/api/status", undefined, 15000);
+    } catch (e) {
+      if (!updRestarting) toast("Lost contact with PlaneSite. Start it again from the Start menu or desktop icon.");
+      next = 4000;
+      return;
+    }
+    try { render(); } catch (e) { reportError("render: " + (e.stack || e.message)); }
+    const busy = status.running || busyScan() || busyExport();
+    next = busy ? 1000 : 3000;
+  } finally {
+    schedule(next);
   }
-  render();
-  const busy = status.running || busyScan() || busyExport();
-  schedule(busy ? 1000 : 3000);
 }
 function schedule(ms) { clearTimeout(pollTimer); pollTimer = setTimeout(refresh, ms); }
 

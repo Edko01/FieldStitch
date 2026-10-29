@@ -1,8 +1,8 @@
 {
- "version": "1.6.9",
+ "version": "1.6.10",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.9.zip",
- "sha256": "d3d265085eec5b530aeff96f8c74405ef5a131dd6a6428a97ed7a70bbfb3185d",
- "notes": "PlaneSite 1.6.9:\n- The fast GeoTIFF export from 1.6.8 now actually runs when you export from the Export window. 1.6.8 only used it when the compression was left unspecified, and the Export window always names it, so exports still took the old, slow route. Exporting the whole orthomosaic now takes about as long as copying the file, and field exports copy every tile inside the field and only redo the tiles along the edge.\n- Exporting in the orthomosaic's own compression (Compact/JPEG for a normal project) adds no extra quality loss. Choosing a different compression or a smaller size still uses the slower route.",
+ "app_zip": "updates/planesite-app-1.6.10.zip",
+ "sha256": "6c8bd351101f6594d36c502a557336213e401ff1d20c0c03cb374676c41a6406",
+ "notes": "PlaneSite 1.6.10:\n- The PlaneSite window should no longer freeze during processing. Processing now runs at below-normal priority: it still uses every idle core, but the desktop and the PlaneSite window come first, so the window keeps updating while all cores are busy. The window is also opened so the browser doesn't pause it when it's covered or in the background (this applies the next time PlaneSite starts).\n- The progress display can't get stuck any more: if one update fails, the next one still comes.\n- If the window does stop responding, PlaneSite now notes when it stopped (and any error on the page) in its log, and Save diagnostics includes that log.",
  "date": "2026-10-29"
 }
