@@ -1,8 +1,8 @@
 {
- "version": "1.6.4",
+ "version": "1.6.5",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.4.zip",
- "sha256": "af0439552e67dfa6709787e2c33166b1732ad381be8508d8197d898270f60da0",
- "notes": "PlaneSite 1.6.4 - sharper detail:\n- Each spot of the mosaic now comes from its most straight-down photo, with only a narrow 1-2 m feather where photos meet. Before, neighbouring photos were blended over several metres, which softened detail and left double edges and halos on raised things like equipment, poles and fences. Rendering is also a little faster.\n- Colour balance only evens out differences between nearby photos, so it can't build up into patches across a large site.\nProcess the project again to apply (the feature step is reused).",
+ "app_zip": "updates/planesite-app-1.6.5.zip",
+ "sha256": "6ef68280475baaa3d460ce186f80883fb336e1f9623c140d6eb66590b9135623",
+ "notes": "PlaneSite 1.6.5 - sharper map view:\n- The map now always draws the orthomosaic from tiles at least as detailed as your screen, including on Windows with display scaling. Before, it often used tiles up to twice as coarse and stretched them, so detail looked soft even though the GeoTIFF was sharp. No need to process again.",
  "date": "2026-10-29"
 }

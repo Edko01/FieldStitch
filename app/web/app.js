@@ -595,11 +595,35 @@ async function loadResult(fit) {
   }
 }
 
+// Leaflet picks tiles at the nearest zoom level (Math.round) and ignores display scaling, so the
+// ortho was often drawn from tiles up to 1.4x coarser than the screen and stretched (twice, on a
+// scaled Windows display): soft detail. This layer always loads tiles at least as sharp as the
+// screen's real pixels and lets the browser shrink them slightly instead.
+const CrispTileLayer = L.TileLayer.extend({
+  _setView(center, zoom, noPrune, noUpdate) {
+    const o = this.options;
+    const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+    let tz = Math.ceil(zoom + Math.log2(dpr) - 0.1);
+    tz = (o.maxZoom !== undefined && tz > o.maxZoom) || (o.minZoom !== undefined && tz < o.minZoom) ? undefined : this._clampZoom(tz);
+    const changed = o.updateWhenZooming && tz !== this._tileZoom;
+    if (!noUpdate || changed) {
+      this._tileZoom = tz;
+      if (this._abortLoading) this._abortLoading();
+      this._updateLevels();
+      this._resetGrid();
+      if (tz !== undefined) this._update(center);
+      if (!noPrune) this._pruneTiles();
+      this._noPrune = !!noPrune;
+    }
+    this._setZoomTransforms(center, zoom);
+  },
+});
+
 function drawOrtho() {
   if (!map || !result) return;
   if (layers.ortho) layers.ortho.remove();
   const b = result.bounds;
-  layers.ortho = L.tileLayer("/tiles/{z}/{x}/{y}.png?v=" + result.mtime, {
+  layers.ortho = new CrispTileLayer("/tiles/{z}/{x}/{y}.png?v=" + result.mtime, {
     tileSize: 256, minNativeZoom: 0, maxNativeZoom: result.max_native_zoom, minZoom: -4, maxZoom: 22,
     noWrap: true, bounds: L.latLngBounds([b[1], b[0]], [b[3], b[2]]), keepBuffer: 6, updateWhenZooming: false, updateInterval: 60,
     opacity: +$("lyrOrthoOp").value,
