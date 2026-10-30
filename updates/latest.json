@@ -1,8 +1,8 @@
 {
- "version": "1.6.17",
+ "version": "1.6.18",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.17.zip",
- "sha256": "e34eee2c8f4b4aadcd448f516613f5f71523e3ba7d0815e87e81e78467ff5b08",
- "notes": "PlaneSite 1.6.17:\n- Fixes zooming on screens with Windows display scaling of 150% or more. At some zoom levels the detailed map layer got stuck re-checking itself, leaving misplaced, mismatched or missing tiles and sometimes freezing the map. The detailed layer now stays within one level of the map, which avoids it.",
- "date": "2026-10-29"
+ "app_zip": "updates/planesite-app-1.6.18.zip",
+ "sha256": "917bddf6c2e624916ac4dcc25baa2d222d49d47f62380793441858f12dd5c00f",
+ "notes": "PlaneSite 1.6.18:\n- Fixes \"Lost contact with PlaneSite\" after the computer sleeps. When the computer woke up, PlaneSite's background process saw that the window hadn't checked in for hours (it couldn't, the computer was asleep) and closed itself, leaving the window without it. It now recognises a sleep and gives the window two minutes to reconnect.\n- PlaneSite's log no longer fills up with harmless errors when the window cancels map tile requests.",
+ "date": "2026-10-30"
 }

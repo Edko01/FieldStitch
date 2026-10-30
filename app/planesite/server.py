@@ -865,6 +865,12 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except _GONE:
+            pass      # the window dropped the request (closed, reloaded, or a tile scrolled away)
+
     def _send(self, code, body, ctype="application/json", headers=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode("utf-8")
@@ -932,9 +938,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data, ctype)
         except ApiError as e:
             self._send(400, {"error": str(e)})
+        except _GONE:
+            pass
         except Exception as e:
             traceback.print_exc()
-            self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
+            try:
+                self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
+            except _GONE:
+                pass
 
     def do_POST(self):
         try:
@@ -1218,16 +1229,32 @@ def _window_trace(browser, state):
         state["quiet"] = 0
 
 
+_GONE = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
+
+
 def lifetime_watch(srv, browser):
     """Quit when the app window is gone and nothing is running."""
     started = time.time()
     trace = {}
+    last_tick = time.time()
+    grace_until = 0.0
     while True:
         time.sleep(5)
+        now = time.time()
+        if now - last_tick > 60:
+            # The computer was asleep: the window hasn't been able to check in either. Give it
+            # time to wake up and reconnect instead of closing straight away.
+            print("%s computer was asleep for %.0f min" % (time.strftime("%H:%M:%S"), (now - last_tick) / 60))
+            grace_until = now + 120
+            if S.last_seen:
+                S.last_seen = now
+        last_tick = now
         try:
             _window_trace(browser, trace)
         except Exception:
             pass
+        if now < grace_until:
+            continue
         busy = (S.dir and S.running()) or (S.scan and not S.scan.get("finished")) \
             or (S.export and not S.export.get("finished")) \
             or updater.state.get("phase") in ("downloading", "installing", "restarting")
