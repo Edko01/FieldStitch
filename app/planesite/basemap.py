@@ -21,12 +21,13 @@ import urllib.request
 
 NAIP_EXPORT = "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPImagery/ImageServer/exportImage"
 CENSUS = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+NOMINATIM = "https://nominatim.openstreetmap.org/search"     # towns, counties, roads, landmarks
 CREDIT = "Imagery: USDA NAIP via USGS The National Map"
 TILE = 256
 
 _slots = threading.BoundedSemaphore(6)      # requests to the image service at once
 _down_until = [0.0]                          # after a failed request, don't retry for a while
-_UA = {"User-Agent": "PlaneSite (offline orthomosaic tool)"}
+_UA = {"User-Agent": "PlaneSite/2.0 (drone mapping desktop app; github.com/Edko01/PlaneSite)"}
 
 
 def _get(url, timeout=20):
@@ -153,19 +154,38 @@ def locate(text):
             return {"lat": ll[0], "lon": ll[1], "label": "%.6f, %.6f" % ll}
         raise ValueError("Couldn't read a location from that link. Paste the coordinates instead "
                          "(in Google Maps, right-click the field and click the numbers at the top).")
-    q = urllib.parse.urlencode({"address": text, "benchmark": "Public_AR_Current", "format": "json"})
+    # street addresses: US Census Bureau geocoder (exact house locations)
+    reached = False
+    if re.match(r"^\s*\d+\s+\S", text):
+        q = urllib.parse.urlencode({"address": text, "benchmark": "Public_AR_Current", "format": "json"})
+        try:
+            with _get(CENSUS + "?" + q, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            reached = True
+            hits = (d.get("result") or {}).get("addressMatches") or []
+            if hits:
+                c = hits[0]["coordinates"]
+                return {"lat": float(c["y"]), "lon": float(c["x"]), "label": hits[0].get("matchedAddress") or text}
+        except Exception:
+            pass
+    # towns, counties, roads and places: OpenStreetMap's search (one request per search, as its
+    # usage policy asks)
+    q = urllib.parse.urlencode({"q": text, "format": "jsonv2", "limit": 1, "countrycodes": "us,ca,mx"})
     try:
-        with _get(CENSUS + "?" + q, timeout=15) as r:
-            d = json.loads(r.read().decode("utf-8"))
+        with _get(NOMINATIM + "?" + q, timeout=15) as r:
+            hits = json.loads(r.read().decode("utf-8"))
+        reached = True
     except Exception:
+        hits = []
+    if hits:
+        h = hits[0]
+        return {"lat": float(h["lat"]), "lon": float(h["lon"]),
+                "label": (h.get("display_name") or text) + " (search © OpenStreetMap)"}
+    if not reached:
         raise ValueError("Couldn't reach the address search. Check the internet connection, or paste "
                          "coordinates instead.")
-    hits = (d.get("result") or {}).get("addressMatches") or []
-    if not hits:
-        raise ValueError("No match for that address. Use a full street address with town and state, "
-                         "or paste coordinates (for example 30.4515, -91.1871) or a Google Maps link.")
-    c = hits[0]["coordinates"]
-    return {"lat": float(c["y"]), "lon": float(c["x"]), "label": hits[0].get("matchedAddress") or text}
+    raise ValueError("No match for that. Try a town and state (Waco, TX), a full street address, or paste "
+                     "coordinates (for example 31.5493, -97.1467) or a Google Maps link.")
 
 
 def _first_url_ll(body):
