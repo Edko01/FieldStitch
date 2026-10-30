@@ -933,6 +933,41 @@ def export_worker(ids, out_dir, compression, scale=1.0, overviews=True, whole=Fa
         S.export.update(finished=True, error=str(e))
 
 
+def basemap_prefetch():
+    """Start fetching the satellite map around the job: its fields, the orthomosaic or the photos
+    (or the planned spot), with a wide margin."""
+    from . import basemap
+    if not S.proj or not S.origin:
+        return {"blocks": 0}
+    _, e0, n0 = S.origin
+    xs, ys = [], []
+    for a in load_areas():
+        for p in a["rings"][0]:
+            xs.append(p[0] - e0); ys.append(p[1] - n0)
+    op = S.ortho_path()
+    if op:
+        try:
+            import rasterio
+            with rasterio.open(op) as ds:
+                bb = ds.bounds
+            xs += [bb.left - e0, bb.right - e0]; ys += [bb.bottom - n0, bb.top - n0]
+        except Exception:
+            pass
+    pts = [m for m in S.proj.get("photos") or [] if m.get("lat") is not None]
+    if pts and not op:
+        from .geo import Geo
+        g = Geo(S.origin[0])
+        for m in pts[:: max(1, len(pts) // 200)]:
+            e, n = g.to_utm(m["lon"], m["lat"])
+            xs.append(e - e0); ys.append(n - n0)
+    if not xs:
+        xs, ys = [0.0], [0.0]
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    half = max(1000.0, 0.75 * max(max(xs) - min(xs), max(ys) - min(ys)))
+    box = (cx - half, cy - half, cx + half, cy + half)
+    return {"blocks": basemap.prefetch(os.path.join(S.dir, "basemap"), S.origin, R0, box)}
+
+
 # ------------------------------------------------------------------- XAG / XYZ map tiles
 _XYZ_PLAN = {}
 
@@ -1472,6 +1507,8 @@ class Handler(BaseHTTPRequestHandler):
             S.cfg["projects_dir"] = parent
             open_project(d)
             return {"dir": d}
+        if path == "/api/basemap/prefetch":
+            return basemap_prefetch()
         if path == "/api/xyz/check":
             return xyz_check(b)
         if path == "/api/xyz/export":

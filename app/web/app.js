@@ -821,7 +821,10 @@ function drawBase() {
     setTimeout(() => { if (t.isConnected) t.src = t.src.replace(/&r=\d+$/, "") + "&r=" + n; }, 800 * n);
   });
   if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; }
+  prefetchBase();
 }
+// fetch the imagery around the job in the background (again when the fields change)
+function prefetchBase() { if ($("lyrBase").checked) api("/api/basemap/prefetch", {}).catch(() => {}); }
 function updateAreasLock(p) {
   const ok = !!(p && (p.has_frame || result));
   $("areasLocked").hidden = ok;
@@ -1204,6 +1207,7 @@ function sizeText(a) {
 async function loadAreas() {
   try { areas = (await api("/api/areas")).areas; } catch (e) { areas = []; }
   drawAreas();
+  prefetchBase();
 }
 const plain = () => areas.map((a) => ({ id: a.id, name: a.name, kind: a.kind, role: a.role, rings: a.rings }));
 async function saveAreas() {
@@ -1956,7 +1960,7 @@ function wire() {
   $("lyrBase").onchange = () => {
     try { localStorage.setItem("planesite.base", $("lyrBase").checked ? "on" : "off"); } catch (e) { /* ignore */ }
     if (!layers.base) return;
-    if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; }
+    if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; prefetchBase(); }
     else { layers.base.remove(); $("mapCredit").hidden = true; }
   };
   document.querySelectorAll("input[name=bndtarget]").forEach((r) => (r.onchange = syncOutlines));

@@ -86,6 +86,46 @@ def tile(cache_dir, z, x, y, origin, r0):
     return None if hit is False else hit
 
 
+_PF = {"key": None}
+
+
+def prefetch(cache_dir, origin, r0, box, zmin=-2, zmax=7, limit=160):
+    """Fetch the imagery around the job in the background, coarse levels first, so panning and
+    zooming there shows tiles from disk. box: (left, bottom, right, top) in map metres from the
+    origin. Two requests at a time, so what's on screen still comes first. Stops when another job
+    is opened or the area changes."""
+    from concurrent.futures import ThreadPoolExecutor
+    key = (cache_dir, tuple(origin), tuple(round(v) for v in box))
+    if _PF["key"] == key:
+        return 0
+    _PF["key"] = key
+    l, b, r, t = box
+    jobs = []
+    for z in range(zmin, zmax + 1):
+        m = TILE * r0 / (2.0 ** z) * BLOCK
+        bxs = range(int(math.floor(l / m)), int(math.floor(r / m)) + 1)
+        bys = range(int(math.floor(-t / m)), int(math.floor(-b / m)) + 1)
+        level = [(z, bx * BLOCK, by * BLOCK) for by in bys for bx in bxs]
+        if len(jobs) + len(level) > limit:
+            break
+        jobs += level
+
+    def one(job):
+        if _PF["key"] != key:
+            return
+        z, x, y = job
+        try:
+            tile(cache_dir, z, x, y, origin, r0)       # fetches (or finds) the whole block
+        except Exception:
+            pass
+
+    def run():
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            list(ex.map(one, jobs))
+    threading.Thread(target=run, daemon=True).start()
+    return len(jobs)
+
+
 def _fetch_block(d, z, bx, by, origin, r0):
     import io
     import numpy as np
