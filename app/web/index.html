@@ -271,7 +271,7 @@
     <div class="pickrow three">
       <button type="button" class="source" id="plFile"><svg><use href="#i-import"/></svg><b>Boundary file</b><small>KML, KMZ, Shapefile or GeoJSON from the customer</small></button>
       <button type="button" class="source" id="plLib"><svg><use href="#i-areas"/></svg><b>Earlier field</b><small>A field from one of your projects</small></button>
-      <button type="button" class="source" id="plFind"><svg><use href="#i-plan"/></svg><b>Find on the map</b><small>Address, coordinates or a map link; draw it yourself</small></button>
+      <button type="button" class="source" id="plFind"><svg><use href="#i-plan"/></svg><b>Find on the map</b><small>Search or click the map, then draw the field</small></button>
     </div>
     <div class="plpane" id="plFilePane" hidden>
       <p class="picked" id="plFileName"></p>
@@ -282,6 +282,8 @@
     </div>
     <div class="plpane" id="plFindPane" hidden>
       <span class="pathrow"><input id="plQ" placeholder="Waco, TX  ·  123 Farm Rd, Town, ST  ·  31.5493, -97.1467  ·  Google Maps link" autocomplete="off" spellcheck="false" aria-label="Address, coordinates or map link"><button type="button" class="ghost" id="plGo">Find</button></span>
+      <div class="plmap" id="plMap" aria-label="Map: click where the field is"></div>
+      <p class="hint small plmaphint" id="plMapHint">Search, or pan and zoom the map and click where the field is. Drag the pin to adjust.</p>
       <button type="button" class="linkish small" id="plLast" hidden></button>
       <p class="picked" id="plFound" hidden></p>
     </div>

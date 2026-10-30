@@ -836,9 +836,34 @@ function updateAreasLock(p) {
 }
 
 // ------------------------------------------------------------------ plan a mission
-const pl = { kind: null, path: null, lib: null, libSel: null, pt: null, nameEdited: false, last: null };
+const pl = { kind: null, path: null, lib: null, libSel: null, pt: null, nameEdited: false, last: null, map: null, pin: null };
+// Picking the spot: an ordinary web map (USGS imagery with roads and place names), separate from the
+// job's own map, which only exists once the job has a location.
+const PL_TILES = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}";
+function plMapInit() {
+  if (pl.map) { setTimeout(() => pl.map.invalidateSize(), 0); return; }
+  pl.map = L.map("plMap", { zoomSnap: 0.5, attributionControl: true, worldCopyJump: true });
+  L.tileLayer(PL_TILES, { maxNativeZoom: 16, maxZoom: 19, attribution: "USGS The National Map" }).addTo(pl.map);
+  pl.map.attributionControl.setPrefix(false);
+  pl.map.on("click", (e) => plSetPoint(e.latlng.lat, e.latlng.lng, "Picked on the map"));
+  if (pl.last) pl.map.setView([pl.last.lat, pl.last.lon], 13); else pl.map.setView([38.5, -96.5], 4);
+  setTimeout(() => pl.map.invalidateSize(), 0);
+}
+function plSetPoint(lat, lon, label, fly) {
+  pl.pt = { lat, lon };
+  const icon = L.divIcon({ className: "plpin", html: '<svg viewBox="0 0 22 22"><path d="M11 21s7-7.2 7-12a7 7 0 0 0-14 0c0 4.8 7 12 7 12z"/><circle cx="11" cy="9" r="2.6" fill="#2A2100"/></svg>', iconSize: null });
+  if (!pl.pin) {
+    pl.pin = L.marker([lat, lon], { icon, draggable: true, keyboard: false }).addTo(pl.map);
+    pl.pin.on("dragend", () => { const ll = pl.pin.getLatLng(); plSetPoint(ll.lat, ll.lng, "Moved on the map"); });
+  } else pl.pin.setLatLng([lat, lon]);
+  if (fly) pl.map.flyTo([lat, lon], fly, { duration: 0.8 });
+  $("plFound").textContent = label + ": " + lat.toFixed(5) + ", " + lon.toFixed(5) + ". The job's map starts here.";
+  $("plFound").hidden = false;
+  plSync();
+}
 async function openPlan() {
   Object.assign(pl, { kind: null, path: null, libSel: null, pt: null, nameEdited: false });
+  if (pl.pin) { pl.pin.remove(); pl.pin = null; }
   $("plName").value = "";
   $("plQ").value = "";
   $("plLibQ").value = "";
@@ -848,7 +873,7 @@ async function openPlan() {
   try { const r = await api("/api/plan/start"); $("plParent").value = r.dir; pl.last = r.last; }
   catch (e) { $("plParent").value = (status && status.default_dir) || ""; pl.last = null; }
   $("plLast").hidden = !pl.last;
-  if (pl.last) $("plLast").textContent = "Or start the map near the last job" + (pl.last.name ? " (" + pl.last.name + ")" : "");
+  if (pl.last) $("plLast").textContent = "Go to the last job" + (pl.last.name ? " (" + pl.last.name + ")" : "");
   $("planDlg").showModal();
 }
 function plMode(kind) {
@@ -911,10 +936,12 @@ async function plFindGo() {
   $("plGo").disabled = true;
   try {
     const r = await api("/api/locate", { q }, 30000);
-    pl.pt = { lat: r.lat, lon: r.lon };
-    $("plFound").textContent = "Found: " + r.label;
-    $("plFound").hidden = false;
-  } catch (e) { pl.pt = null; $("plFound").hidden = true; setErr("plErr", e.message); }
+    plMapInit();
+    // a street address or coordinates are the spot itself; a town or county is only where to look
+    const exact = /^\s*\d+\s+\S/.test(q) || !/OpenStreetMap/.test(r.label);
+    plSetPoint(r.lat, r.lon, "Found " + r.label, exact ? 16 : 12);
+    if (!exact) $("plFound").textContent += " Zoom in and click the field to start right on it.";
+  } catch (e) { setErr("plErr", e.message); }
   finally { $("plGo").disabled = false; plSync(); }
 }
 async function plCreate() {
@@ -1803,17 +1830,12 @@ function wire() {
   $("dPlan").onclick = openPlan;
   $("plFile").onclick = plPickFile;
   $("plLib").onclick = plOpenLib;
-  $("plFind").onclick = () => { plMode("find"); $("plQ").focus(); };
+  $("plFind").onclick = () => { plMode("find"); plMapInit(); $("plQ").focus(); };
   $("plGo").onclick = plFindGo;
   $("plQ").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); plFindGo(); } };
   $("plLibQ").oninput = plRenderLib;
   $("plLibQ").onkeydown = (e) => { if (e.key === "Enter") e.preventDefault(); };
-  $("plLast").onclick = () => {
-    pl.pt = { lat: pl.last.lat, lon: pl.last.lon };
-    $("plFound").textContent = "The map starts at the last job (" + (pl.last.name || "") + "). Find the field there and draw it.";
-    $("plFound").hidden = false;
-    plSync();
-  };
+  $("plLast").onclick = () => { plMapInit(); plSetPoint(pl.last.lat, pl.last.lon, "Last job (" + (pl.last.name || "") + ")", 14); };
   $("plName").oninput = () => { pl.nameEdited = !!$("plName").value.trim(); plSync(); };
   $("plName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("plCreate").disabled) plCreate(); } };
   $("plBrowse").onclick = async () => { const p = await browse("folder", "Save the job in", $("plParent").value); if (p) $("plParent").value = p; };

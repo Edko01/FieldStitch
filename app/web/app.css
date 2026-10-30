@@ -544,3 +544,9 @@ dialog.modal .bar { margin: 4px 0 12px; }
 .card .thumb.planned { background: #2B3A32; color: var(--stake); font-weight: 600; }
 .mapcredit { position: absolute; left: 8px; bottom: 6px; z-index: 700; font-size: 10.5px; color: #E9EEEA; text-shadow: 0 0 3px rgba(0,0,0,.8); pointer-events: none; }
 @media (max-width: 900px) { .starts { grid-template-columns: 1fr 1fr; } .pickrow.three { grid-template-columns: 1fr; } }
+.plmap { height: 300px; margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: #DDE3DE; }
+.plmap .leaflet-control-attribution { font-size: 10px; }
+.plmaphint { margin: 4px 0 0 !important; }
+.plpin { width: 22px; height: 22px; margin: -22px 0 0 -11px; }
+.plpin svg { width: 22px; height: 22px; fill: var(--stake); stroke: var(--stake-ink); stroke-width: 1.4; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+#planDlg { max-height: calc(100vh - 32px); overflow-y: auto; }
