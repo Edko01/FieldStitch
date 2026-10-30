@@ -1,8 +1,8 @@
 {
- "version": "1.6.11",
+ "version": "1.6.12",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.11.zip",
- "sha256": "e6681262bc1ebb3af314d75e1081100cbed03be9cf680f57fa57206d6257c879",
- "notes": "PlaneSite 1.6.11:\n- Matching no longer drops a photo pair when OpenCV's estimator trips over a nearly degenerate set of matches; it retries with a simpler method instead.\n- The log now shows the real graphics memory of NVIDIA cards (Windows reports every card with 4 GB or more as 4 GB).",
+ "app_zip": "updates/planesite-app-1.6.12.zip",
+ "sha256": "382361b05eef80f5986f2a3c5081e9e28402561a5502f0e00458d86cd3a4ed76",
+ "notes": "PlaneSite 1.6.12:\n- Better use of PPK results. Photos your PPK tool couldn't fully fix (float, or forward and backward runs that disagree) are now held to the accuracy the tool recorded for them, instead of being allowed to drift up to 2 m. Fixed photos are unchanged. On a PPK test flight the unfixed photos stayed within about 4 cm of their PPK positions instead of wandering about 80 cm, with the photos fitting together just as well.\n- The log now shows the camera position adjustment separately for RTK-fixed and not-fixed photos.",
  "date": "2026-10-29"
 }
