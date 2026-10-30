@@ -646,7 +646,10 @@ function sharpZoom(layer, zoom) {
   const o = layer.options;
   const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
   // finer tiles only when the stretch would be visible (over ~1.2x): each finer level is 4x the tiles
-  const tz = Math.ceil(zoom + Math.log2(dpr) - 0.27);
+  // Leaflet re-syncs a tile layer whose level is more than one level away from the map zoom; a
+  // finer level than that made it call itself forever (stack overflow, frozen map) at 150%
+  // display scaling. So never more than one level finer than the map.
+  const tz = Math.min(Math.ceil(zoom + Math.log2(dpr) - 0.27), Math.floor(zoom + 1));
   return (o.maxZoom !== undefined && tz > o.maxZoom) || (o.minZoom !== undefined && tz < o.minZoom) ? undefined : layer._clampZoom(tz);
 }
 const SharpTileLayer = L.TileLayer.extend({
