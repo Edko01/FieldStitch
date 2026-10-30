@@ -1204,7 +1204,7 @@ class Handler(BaseHTTPRequestHandler):
 def _window_trace(browser, state):
     """Note in the log when an open window stops asking for updates (it polls every 1-3 s) and
     when it starts again, so a frozen window leaves a trace."""
-    if not S.last_seen or (browser is not None and browser.poll() is not None):
+    if not S.last_seen:
         return
     idle = time.time() - S.last_seen
     if idle > 15 and not state.get("quiet"):

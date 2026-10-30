@@ -67,6 +67,10 @@ WINDOW_FLAGS = [
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-features=Translate,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
+    # Draw the window without the graphics card. Processing keeps the NVIDIA card busy with long
+    # rendering work, and on laptops the browser's own GPU drawing can stall behind it, leaving
+    # the window frozen while PlaneSite keeps running. The map and panels draw fine in software.
+    "--disable-gpu",
 ]
 
 
