@@ -31,7 +31,7 @@ WEB = os.environ.get("PLANESITE_GITHUB_WEB", "https://github.com")
 RAW = "https://raw.githubusercontent.com"
 CRED = "github-user-token"
 # The registered GitHub App (not secret). Settings can override them ("github_app" in config).
-DEFAULT_APP = {"client_id": "", "slug": ""}
+DEFAULT_APP = {"client_id": "Iv23li7SRxKFAMsZaB0H", "slug": "planesite-edko"}   # EdkoLLC's "PlaneSite Edko" app (not secret)
 _UA = "PlaneSite/2.0"
 
 

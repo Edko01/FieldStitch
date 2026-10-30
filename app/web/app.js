@@ -1764,6 +1764,7 @@ async function pubStatus() {
   if (f && f.state === "error" && !st.ready) setErr("pubErr", f.message);
   $("pubUser").textContent = st.user || "";
   $("pubMain").hidden = !st.ready;
+  pub.ready = !!st.ready;
   if (st.ready && !pub.targets) await pubTargets();
   pubJob(st.job);
   const busy = waiting || (st.job && st.job.running);
@@ -1789,6 +1790,7 @@ async function pubTargets() {
   $("pubInstallUrl").textContent = pub.targets.add_url || "";
   if (!pub.targets.targets.length) $("pubTargetNote").textContent = "PlaneSite isn't installed on any GitHub account or organisation you can reach yet.";
   pubTargetNote();
+  $("pubGo").disabled = !!(pub.job && pub.job.running) || !pub.ready || !sel.value;
   pubCheckSoon();
 }
 function pubTargetNote() {
@@ -1838,9 +1840,10 @@ async function pubStart(mode) {
   } catch (e) { setErr("pubErr", e.message); }
 }
 function pubJob(j) {
+  pub.job = j;
   const running = !!(j && j.running);
   $("pubStop").hidden = !running;
-  $("pubGo").disabled = running;
+  $("pubGo").disabled = running || !pub.ready || !$("pubTarget").value;
   ["pubTarget", "pubName", "pubFolder", "pubBrowse"].forEach((id) => ($(id).disabled = running));
   $("pubBarWrap").hidden = !running;
   if (!j) { $("pubProg").textContent = ""; return; }
