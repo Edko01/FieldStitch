@@ -1,8 +1,8 @@
 {
- "version": "1.6.14",
+ "version": "1.6.15",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.14.zip",
- "sha256": "0a5095ace0fcd37bd299c3b5975cd86c856d3fa1d50b88574a517f3034d8eb7a",
- "notes": "PlaneSite 1.6.14:\n- Another fix for the window freezing while an orthomosaic renders. Processing itself was finishing normally each time; the window stopped updating at about the moment the graphics card starts its rendering work. The PlaneSite window now draws without the graphics card, so a busy NVIDIA card can't hold it up. This takes effect the next time PlaneSite is opened after the update (close the PlaneSite window and start it again).\n- If the window still runs into a problem, PlaneSite now records exactly where (with readable details) in its log, which Save diagnostics includes.",
+ "app_zip": "updates/planesite-app-1.6.15.zip",
+ "sha256": "a2da5bdf4a3d21da229c3b13694d2f9817ec9a97b076f582ef75bb031a0ab8a0",
+ "notes": "PlaneSite 1.6.15:\n- Removes a stray file that was accidentally included in 1.6.14. No other changes; see 1.6.14 for the window freeze fix (close the PlaneSite window and start it again after updating so it takes effect).",
  "date": "2026-10-29"
 }
