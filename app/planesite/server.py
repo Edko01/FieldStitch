@@ -73,6 +73,7 @@ class State:
         self.proc = None
         self.scan = None       # {"done", "total", "folder", "error"}
         self.export = None     # {"done", "total", "current", "frac", "files", "errors", "out_dir"}
+        self.publish = None    # {"running", "phase", "part", "parts", "sent", "total", "error", "result", ...}
         self.cfg_path = os.path.join(config_dir(), "config.json")
         try:
             with open(self.cfg_path, "r", encoding="utf-8") as f:
@@ -978,6 +979,89 @@ def basemap_prefetch():
     return {"blocks": basemap.prefetch(os.path.join(S.dir, "basemap"), S.origin, R0, box)}
 
 
+# ------------------------------------------------------------------- publish map tiles
+# Destinations are pluggable (planesite.publish): GitHub now, Cloudflare R2 later.
+def _dest(b):
+    from . import publish
+    try:
+        return publish.get(b.get("dest") or "github", S.cfg)
+    except publish.PublishError as e:
+        raise ApiError(str(e))
+
+
+def _pub(fn, *a):
+    from . import publish
+    try:
+        return fn(*a)
+    except publish.PublishError as e:
+        raise ApiError(str(e))
+
+
+def publish_status(b):
+    d = _dest(b)
+    out = d.status()
+    out["job"] = S.publish
+    return out
+
+
+def publish_check(b):
+    from . import publish, xyztiles
+    d = _dest(b)
+    folder = (b.get("folder") or "").strip()
+    if not os.path.isdir(folder):
+        raise ApiError("Tile folder not found: %s" % folder)
+    target = (b.get("target") or "").strip()
+    if not target:
+        raise ApiError("Choose where to publish.")
+    name = xyztiles.repo_name(b.get("name") or os.path.basename(folder))
+    summ = publish.folder_summary(folder)
+    if not summ["tiles"]:
+        raise ApiError("There are no tiles in %s. Make the XAG tiles first." % folder)
+    out = _pub(d.check, target, name, folder)
+    out.update(summ)
+    out.update({"name": name, "url": d.tile_url(target, name),
+                "notes": xyztiles.github_notes(summ["bytes"]) if d.id == "github" else []})
+    return out
+
+
+def publish_start(b):
+    from . import xyztiles
+    if S.publish and S.publish.get("running"):
+        raise ApiError("A publish is already running.")
+    d = _dest(b)
+    folder = (b.get("folder") or "").strip()
+    target = (b.get("target") or "").strip()
+    name = xyztiles.repo_name(b.get("name") or os.path.basename(folder))
+    mode = b.get("mode") or "new"
+    if mode not in ("new", "into", "resume"):
+        raise ApiError("Unknown publish mode.")
+    job = {"running": True, "phase": "preparing", "part": 0, "parts": 0, "sent": 0, "total": 0, "error": None,
+           "result": None, "dest": d.id, "target": target, "name": name, "folder": folder, "mode": mode,
+           "cancel": False, "url": d.tile_url(target, name)}
+    S.publish = job
+    S.cfg.setdefault("publish", {})[d.id] = {"target": target}
+    S.save_cfg()
+
+    def work():
+        from . import publish
+        try:
+            def prog(p):
+                job.update({k: p[k] for k in ("phase", "part", "parts", "sent", "total") if k in p})
+            res = d.publish(folder, target, name, mode, prog, lambda: job["cancel"])
+            job["result"] = res
+            if res.get("stopped"):
+                job["phase"] = "stopped"
+        except publish.PublishError as e:
+            job["error"] = str(e)
+        except Exception as e:
+            traceback.print_exc()
+            job["error"] = "%s: %s" % (type(e).__name__, e)
+        finally:
+            job["running"] = False
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------- XAG / XYZ map tiles
 _XYZ_PLAN = {}
 
@@ -1406,6 +1490,8 @@ class Handler(BaseHTTPRequestHandler):
                     "running": S.running() if S.dir else False, "progress": progress_state(),
                     "scan": S.scan, "export": S.export, "platform": sys.platform,
                     "update": dict(updater.state)}
+        if path == "/api/publish/status":
+            return publish_status({"dest": (q.get("dest") or ["github"])[0]})
         if path == "/api/xyz/settings":
             return xyz_settings()
         if path == "/api/plan/start":
@@ -1518,6 +1604,25 @@ class Handler(BaseHTTPRequestHandler):
             return {"dir": d}
         if path == "/api/basemap/prefetch":
             return basemap_prefetch()
+        if path == "/api/publish/signin":
+            return _pub(_dest(b).start_signin)
+        if path == "/api/publish/signout":
+            _dest(b).signout()
+            return {}
+        if path == "/api/publish/targets":
+            return _pub(_dest(b).targets)
+        if path == "/api/publish/app":
+            S.cfg["github_app"] = {"client_id": (b.get("client_id") or "").strip(), "slug": (b.get("slug") or "").strip()}
+            S.save_cfg()
+            return _dest({"dest": "github"}).status()
+        if path == "/api/publish/check":
+            return publish_check(b)
+        if path == "/api/publish/start":
+            return publish_start(b)
+        if path == "/api/publish/cancel":
+            if S.publish and S.publish.get("running"):
+                S.publish["cancel"] = True
+            return {}
         if path == "/api/xyz/check":
             return xyz_check(b)
         if path == "/api/xyz/export":
@@ -1564,6 +1669,13 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError("Processing is running.")
             S.dir = S.proj = None
             S.scan = S.export = None
+            return {}
+        if path == "/api/open_url":
+            u = b.get("url") or ""
+            if not re.match(r"^https?://", u):
+                raise ApiError("Not a web address.")
+            import webbrowser
+            webbrowser.open(u)
             return {}
         if path == "/api/open_path":
             p = b.get("path") or (S.dir if S.dir else "")
@@ -1758,6 +1870,7 @@ def lifetime_watch(srv, browser):
             continue
         busy = (S.dir and S.running()) or (S.scan and not S.scan.get("finished")) \
             or (S.export and not S.export.get("finished")) \
+            or (S.publish and S.publish.get("running")) \
             or updater.state.get("phase") in ("downloading", "installing", "restarting")
         if busy:
             continue

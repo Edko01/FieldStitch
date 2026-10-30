@@ -1688,6 +1688,7 @@ async function xyzCheck() {
     $("xyzCount").textContent = "Up to " + fmt(r.total) + " (zoom " + zs[0] + ": " + fmt(r.counts[zs[0]]) +
       (zs.length > 1 ? " … zoom " + zs[zs.length - 1] + ": " + fmt(r.counts[zs[zs.length - 1]]) : "") + "). Empty tiles are left out.";
     const ex = r.existing_zooms;
+    $("xyzPublish").hidden = !ex.length;
     $("xyzExisting").hidden = !ex.length;
     if (ex.length) $("xyzExisting").textContent = "This folder already has tiles (zoom " + ex[0] + (ex.length > 1 ? "–" + ex[ex.length - 1] : "") +
       "). They'll be replaced; " + (r.git ? "the Git files and anything else in the folder are kept." : "other files in the folder are kept.");
@@ -1726,7 +1727,155 @@ function xyzFinished(ex) {
   ul.hidden = !(r.notes || []).length;
   $("xyzOpen").hidden = false;
   $("xyzCopy").hidden = false;
+  $("xyzPublish").hidden = false;
   xyzCheck();
+}
+
+// ------------------------------------------------------------------ publish map tiles
+// GitHub now; the destination is a parameter so Cloudflare R2 can be added later.
+const pub = { dest: "github", timer: 0, checkT: 0, check: null, targets: null, seq: 0, lastJob: null };
+async function openPublish(folder, name) {
+  setErr("pubErr", "");
+  ["pubExists", "pubDone", "pubNotes", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
+  if (folder) $("pubFolder").value = folder;
+  if (name) $("pubName").value = name;
+  if (!$("pubFolder").value) {
+    try { const st = await api("/api/xyz/settings"); $("pubFolder").value = st.parent + sep() + st.name; $("pubName").value = st.name; }
+    catch (e) { /* no project: the user picks the folder */ }
+  }
+  if (!$("pubName").value && $("pubFolder").value) $("pubName").value = $("pubFolder").value.split(/[\\/]/).pop();
+  if (!$("pubDlg").open) $("pubDlg").showModal();
+  pub.targets = null;
+  await pubStatus();
+}
+async function pubStatus() {
+  let st;
+  try { st = await api("/api/publish/status?dest=" + pub.dest); } catch (e) { return setErr("pubErr", e.message); }
+  $("pubClientId").value = $("pubClientId").value || (st.app && st.app.client_id) || "";
+  $("pubSlug").value = $("pubSlug").value || (st.app && st.app.slug) || "";
+  $("pubAppState").textContent = st.configured ? "" : "(not set up yet)";
+  if (!st.configured) $("pubAppBox").open = true;
+  const f = st.flow, waiting = f && f.state === "waiting";
+  $("pubSignedIn").hidden = !st.ready || waiting;
+  $("pubSignedOut").hidden = st.ready || waiting;
+  $("pubCode").hidden = !waiting;
+  $("pubSignin").disabled = !st.configured;
+  if (waiting) $("pubCodeText").textContent = f.user_code;
+  if (f && f.state === "error" && !st.ready) setErr("pubErr", f.message);
+  $("pubUser").textContent = st.user || "";
+  $("pubMain").hidden = !st.ready;
+  if (st.ready && !pub.targets) await pubTargets();
+  pubJob(st.job);
+  const busy = waiting || (st.job && st.job.running);
+  clearTimeout(pub.timer);
+  if (busy && $("pubDlg").open) pub.timer = setTimeout(pubStatus, 1000);
+}
+async function pubTargets() {
+  try { pub.targets = await api("/api/publish/targets", { dest: pub.dest }); }
+  catch (e) { pub.targets = null; return setErr("pubErr", e.message); }
+  const sel = $("pubTarget");
+  const keep = sel.value;
+  sel.innerHTML = "";
+  for (const t of pub.targets.targets) {
+    const o = document.createElement("option");
+    o.value = t.id;
+    o.textContent = t.label + (t.type === "User" ? " (your account)" : "") + (t.ok ? "" : " (no access)");
+    o.disabled = !t.ok;
+    sel.append(o);
+  }
+  const ids = pub.targets.targets.filter((t) => t.ok).map((t) => t.id);
+  sel.value = ids.includes(keep) ? keep : ids.includes("Edko01") ? "Edko01" : ids[0] || "";
+  $("pubInstall").hidden = !pub.targets.add_url;
+  $("pubInstallUrl").textContent = pub.targets.add_url || "";
+  if (!pub.targets.targets.length) $("pubTargetNote").textContent = "PlaneSite isn't installed on any GitHub account or organisation you can reach yet.";
+  pubTargetNote();
+  pubCheckSoon();
+}
+function pubTargetNote() {
+  const t = pub.targets && pub.targets.targets.find((x) => x.id === $("pubTarget").value);
+  if (t) $("pubTargetNote").textContent = t.note || "";
+}
+function pubCheckSoon() { clearTimeout(pub.checkT); pub.checkT = setTimeout(pubCheck, 400); }
+async function pubCheck() {
+  const seq = ++pub.seq;
+  pub.check = null;
+  $("pubExists").hidden = true;
+  const b = { dest: pub.dest, target: $("pubTarget").value, name: $("pubName").value.trim(), folder: $("pubFolder").value.trim() };
+  if (!b.target || !b.folder) return;
+  try {
+    const r = await api("/api/publish/check", b, 30000);
+    if (seq !== pub.seq) return;
+    setErr("pubErr", "");
+    pub.check = r;
+    $("pubTiles").textContent = fmt(r.tiles) + " tiles, " + fmtBytes(r.bytes) + (r.zooms ? ", zoom " + r.zooms[0] + "–" + r.zooms[1] : "") +
+      (r.pushes > 1 ? " · goes up in " + r.pushes + " parts" : "") + (r.exists ? " · the repository already exists" : "");
+    $("pubUrl").textContent = r.url;
+    const ul = $("pubNotes");
+    ul.innerHTML = "";
+    for (const n of r.notes || []) { const li = document.createElement("li"); li.textContent = n; ul.append(li); }
+    ul.hidden = !(r.notes || []).length;
+  } catch (e) { if (seq === pub.seq) { $("pubTiles").textContent = "–"; $("pubUrl").textContent = "–"; setErr("pubErr", e.message); } }
+}
+async function pubGo() {
+  setErr("pubErr", "");
+  await pubCheck();
+  const r = pub.check;
+  if (!r) return;
+  if (!r.exists) return pubStart("new");
+  $("pubExistsText").textContent = "A repository named " + r.name + " already exists in " + $("pubTarget").value + "." +
+    (r.resumable ? " An earlier publish of this folder stopped after part " + r.done + " of " + r.total + ": resume it, or push the whole map into the repository again." :
+                   " Push the map into it? Its zoom folders are replaced; other files (like a README) are kept.");
+  $("pubResume").hidden = !r.resumable;
+  $("pubExists").hidden = false;
+}
+async function pubStart(mode) {
+  $("pubExists").hidden = true;
+  ["pubDone", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
+  try {
+    await api("/api/publish/start", { dest: pub.dest, target: $("pubTarget").value, name: $("pubName").value.trim(),
+                                      folder: $("pubFolder").value.trim(), mode });
+    pubStatus();
+  } catch (e) { setErr("pubErr", e.message); }
+}
+function pubJob(j) {
+  const running = !!(j && j.running);
+  $("pubStop").hidden = !running;
+  $("pubGo").disabled = running;
+  ["pubTarget", "pubName", "pubFolder", "pubBrowse"].forEach((id) => ($(id).disabled = running));
+  $("pubBarWrap").hidden = !running;
+  if (!j) { $("pubProg").textContent = ""; return; }
+  if (running) {
+    $("pubBar").style.width = (j.total ? (100 * j.sent) / j.total : 2) + "%";
+    $("pubProg").textContent = (j.parts ? "Part " + Math.max(1, j.part) + " of " + j.parts + " · " : "") +
+      (j.phase === "preparing" ? "Preparing… " : "") + fmtBytes(j.sent) + " of " + fmtBytes(j.total) + " uploaded";
+  } else if (pub.lastJob && pub.lastJob.running) {
+    // just finished
+    if (j.error) { setErr("pubErr", j.error); $("pubProg").textContent = ""; pubCheckSoon(); }
+    else if (j.result && j.result.stopped) { $("pubProg").textContent = "Stopped after part " + j.result.done + " of " + j.result.parts + ". Publish again to resume."; pubCheckSoon(); }
+    else if (j.result) {
+      const r = j.result;
+      $("pubProg").textContent = "";
+      const d = $("pubDone");
+      d.innerHTML = "";
+      const p1 = document.createElement("p");
+      p1.textContent = "Published " + fmt(r.tiles) + " tiles (" + fmtBytes(r.bytes) + ") to " + j.target + "/" + j.name +
+        (r.parts > 1 ? " in " + r.parts + " parts" : "") + ". Tile address for XAG One:";
+      const p2 = document.createElement("p");
+      const code = document.createElement("code");
+      code.textContent = r.url;
+      p2.append(code);
+      d.append(p1, p2);
+      d.hidden = false;
+      pub.url = r.url; pub.repo = r.repo_url;
+      $("pubCopyUrl").hidden = false;
+      $("pubOpenRepo").hidden = false;
+      copyText(r.url, "Tile address copied.");
+    }
+  }
+  pub.lastJob = j;
+}
+async function copyText(t, ok) {
+  try { await navigator.clipboard.writeText(t); toast(ok); } catch (e) { /* the address stays on screen */ }
 }
 
 // ------------------------------------------------------------------ projects dashboard
@@ -1827,6 +1976,37 @@ function wire() {
     catch (e) { toast("Couldn't copy. Select the address in the window and copy it."); }
   };
   $("xyzForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); xyzStart(); } };
+  $("xyzPublish").onclick = () => { $("xyzDlg").close(); openPublish(xyz.folder, $("xyzName").value.trim()); };
+  $("exPublish").onclick = () => openPublish();
+  $("pubSignin").onclick = async () => {
+    setErr("pubErr", "");
+    try { await api("/api/publish/signin", { dest: pub.dest }); } catch (e) { return setErr("pubErr", e.message); }
+    pubStatus();
+  };
+  $("pubCopyOpen").onclick = async () => {
+    const code = $("pubCodeText").textContent;
+    await copyText(code, "Code copied: paste it on GitHub.");
+    try { const st = await api("/api/publish/status?dest=" + pub.dest); api("/api/open_url", { url: (st.flow && st.flow.verification_uri) || "https://github.com/login/device" }); }
+    catch (e) { /* the code is on screen */ }
+  };
+  $("pubCodeCancel").onclick = async () => { await api("/api/publish/signout", { dest: pub.dest }); pubStatus(); };
+  $("pubSignout").onclick = async () => { await api("/api/publish/signout", { dest: pub.dest }); pub.targets = null; pubStatus(); };
+  $("pubAppSave").onclick = async () => {
+    try { await api("/api/publish/app", { client_id: $("pubClientId").value, slug: $("pubSlug").value }); $("pubAppBox").open = false; pubStatus(); }
+    catch (e) { setErr("pubErr", e.message); }
+  };
+  $("pubTarget").onchange = () => { pubTargetNote(); pubCheckSoon(); };
+  $("pubName").oninput = pubCheckSoon;
+  $("pubFolder").oninput = pubCheckSoon;
+  $("pubBrowse").onclick = async () => { const p = await browse("folder", "The map's tile folder", $("pubFolder").value); if (p) { $("pubFolder").value = p; if (!$("pubName").value) $("pubName").value = p.split(/[\\/]/).pop(); pubCheckSoon(); } };
+  $("pubInstallCopy").onclick = () => copyText($("pubInstallUrl").textContent, "Install link copied.");
+  $("pubExCancel").onclick = () => ($("pubExists").hidden = true);
+  $("pubInto").onclick = () => pubStart("into");
+  $("pubResume").onclick = () => pubStart("resume");
+  $("pubStop").onclick = () => api("/api/publish/cancel", {});
+  $("pubCopyUrl").onclick = () => copyText(pub.url, "Tile address copied.");
+  $("pubOpenRepo").onclick = () => api("/api/open_url", { url: pub.repo });
+  $("pubForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "publish") { e.preventDefault(); pubGo(); } };
 
   // top bar
   $("btnProjects").onclick = () => {

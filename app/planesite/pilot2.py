@@ -383,7 +383,7 @@ def _win_cred_struct():
     return CREDENTIAL
 
 
-def _win_cred_write(target, secret):
+def _win_cred_write(target, secret, comment="PlaneSite: office password for the Pilot 2 hub"):
     import ctypes
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
     if not secret:
@@ -395,7 +395,7 @@ def _win_cred_write(target, secret):
     c = CREDENTIAL()
     c.Type = 1                       # CRED_TYPE_GENERIC
     c.TargetName = target
-    c.Comment = "PlaneSite: office password for the Pilot 2 hub"
+    c.Comment = comment
     c.CredentialBlobSize = len(blob)
     c.CredentialBlob = ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte))
     c.Persist = 2                    # CRED_PERSIST_LOCAL_MACHINE (this Windows user, this PC)

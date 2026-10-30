@@ -194,6 +194,7 @@
       <div class="exportlist">
         <button class="startbtn" id="exGeotiff"><svg><use href="#i-tif"/></svg><span><b>GeoTIFF…</b><small>The whole orthomosaic or one file per area, for GIS and farm software</small></span></button>
         <button class="startbtn" id="exXag"><svg><use href="#i-grid"/></svg><span><b>XAG map tiles…</b><small>The whole orthomosaic as a tile folder for the XAG One app (one GitHub repo per map)</small></span></button>
+        <button class="startbtn" id="exPublish"><svg><use href="#i-export"/></svg><span><b>Publish map tiles…</b><small>Put a tile folder on GitHub so XAG One can load it</small></span></button>
         <button class="startbtn" id="exBounds"><svg><use href="#i-areas"/></svg><span><b>Field boundaries…</b><small>For DJI Pilot 2, DJI Agras, XAG, Ceres and other software</small></span></button>
       </div>
     </section>
@@ -485,7 +486,76 @@
       <button class="ghost" value="cancel">Close</button>
       <button class="ghost" type="button" id="xyzCopy" hidden>Copy tile address</button>
       <button class="ghost" type="button" id="xyzOpen" hidden>Open folder</button>
+      <button class="ghost" type="button" id="xyzPublish" hidden>Publish to GitHub…</button>
       <button class="primary" id="xyzGo" value="export">Make tiles</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===== publish map tiles ===== -->
+<dialog class="modal wide" id="pubDlg" aria-labelledby="pubTitle">
+  <form method="dialog" id="pubForm">
+    <header class="modalhead"><h2 id="pubTitle">Publish to GitHub</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <p class="hint small">Puts the map's tile folder in its own public GitHub repository, where the XAG One app loads it. Large maps go up in several parts.</p>
+    <section class="pubacct">
+      <div id="pubSignedOut">
+        <p><b>GitHub account</b><br><small class="muted">Sign in once. PlaneSite keeps the sign-in in Windows Credential Manager.</small></p>
+        <button type="button" class="primary small" id="pubSignin">Sign in with GitHub</button>
+      </div>
+      <div id="pubCode" hidden>
+        <p>On GitHub, enter this code:</p>
+        <code class="devcode" id="pubCodeText"></code>
+        <div class="btnrow"><button type="button" class="primary small" id="pubCopyOpen">Copy code and open GitHub</button>
+          <button type="button" class="ghost small" id="pubCodeCancel">Cancel</button></div>
+        <p class="hint small" id="pubCodeWait">Waiting for you to approve PlaneSite on GitHub…</p>
+      </div>
+      <div id="pubSignedIn" hidden>
+        <p>Signed in to GitHub as <b id="pubUser"></b> · <button type="button" class="linkish" id="pubSignout">Sign out</button></p>
+      </div>
+    </section>
+    <details class="p2conn" id="pubAppBox">
+      <summary>GitHub App settings <small class="muted" id="pubAppState"></small></summary>
+      <div class="xyzgrid two">
+        <label>Client ID<input id="pubClientId" autocomplete="off" spellcheck="false" placeholder="Iv23…"></label>
+        <label>App name in its address<input id="pubSlug" autocomplete="off" spellcheck="false" placeholder="planesite"></label>
+      </div>
+      <p class="hint small">From the PlaneSite GitHub App's settings page (github.com/settings/apps). Neither is secret.</p>
+      <div class="btnrow end"><button type="button" class="ghost small" id="pubAppSave">Save</button></div>
+    </details>
+    <div id="pubMain" hidden>
+      <div class="xyzgrid two">
+        <label>Publish to<select id="pubTarget"></select></label>
+        <label>Repository name<input id="pubName" autocomplete="off" spellcheck="false" maxlength="100"></label>
+      </div>
+      <p class="hint small" id="pubTargetNote"></p>
+      <p class="hint small" id="pubInstall" hidden>Organisation not listed? PlaneSite isn't installed there yet. Send this link to an owner of the organisation: <code id="pubInstallUrl"></code> <button type="button" class="linkish" id="pubInstallCopy">Copy link</button></p>
+      <label>Tile folder
+        <span class="pathrow"><input id="pubFolder" spellcheck="false"><button type="button" class="ghost" id="pubBrowse">Browse…</button></span>
+      </label>
+      <div class="xyzinfo">
+        <div><small>Tiles</small><b id="pubTiles">–</b></div>
+        <div><small>Tile address for XAG One</small><code id="pubUrl">–</code></div>
+      </div>
+      <ul class="xyznotes" id="pubNotes" hidden></ul>
+      <div class="pubexists" id="pubExists" hidden>
+        <p id="pubExistsText"></p>
+        <div class="btnrow end">
+          <button type="button" class="ghost small" id="pubExCancel">Cancel</button>
+          <button type="button" class="ghost small" id="pubResume" hidden>Resume</button>
+          <button type="button" class="primary small" id="pubInto">Push into it</button>
+        </div>
+      </div>
+      <div class="bar" id="pubBarWrap" hidden><i id="pubBar"></i></div>
+      <p class="hint small" id="pubProg"></p>
+      <div class="p2ok" id="pubDone" hidden></div>
+    </div>
+    <p class="form-error" id="pubErr" role="alert"></p>
+    <div class="btnrow end">
+      <button class="ghost" value="cancel">Close</button>
+      <button class="ghost" type="button" id="pubStop" hidden>Stop</button>
+      <button class="ghost" type="button" id="pubCopyUrl" hidden>Copy tile address</button>
+      <button class="ghost" type="button" id="pubOpenRepo" hidden>Open on GitHub</button>
+      <button class="primary" id="pubGo" value="publish">Publish</button>
     </div>
   </form>
 </dialog>
