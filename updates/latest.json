@@ -1,8 +1,8 @@
 {
- "version": "1.6.13",
+ "version": "1.6.14",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.13.zip",
- "sha256": "a7496d271fc2f1bb68b053eecdb62ccec7b5f5eb71976b46b524c813b55a8a5e",
- "notes": "PlaneSite 1.6.13:\n- Edit area outlines. Click the pencil next to an area (or double-click the area on the map) to show its corners: drag a corner to move it, drag or click a small middle dot to add a corner, right-click a corner (or click it and press Delete) to remove it. Ctrl+Z undoes, Done (Enter) saves, Cancel (Esc) puts it back. The acreage updates as you edit. Works on drawn, grid and imported areas.\n- While drawing a polygon you can now drag the map to move around; only clicks place corners.",
+ "app_zip": "updates/planesite-app-1.6.14.zip",
+ "sha256": "0a5095ace0fcd37bd299c3b5975cd86c856d3fa1d50b88574a517f3034d8eb7a",
+ "notes": "PlaneSite 1.6.14:\n- Another fix for the window freezing while an orthomosaic renders. Processing itself was finishing normally each time; the window stopped updating at about the moment the graphics card starts its rendering work. The PlaneSite window now draws without the graphics card, so a busy NVIDIA card can't hold it up. This takes effect the next time PlaneSite is opened after the update (close the PlaneSite window and start it again).\n- If the window still runs into a problem, PlaneSite now records exactly where (with readable details) in its log, which Save diagnostics includes.",
  "date": "2026-10-29"
 }

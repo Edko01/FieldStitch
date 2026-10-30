@@ -95,11 +95,30 @@ const busyExport = () => status && status.export && !status.export.finished;
 // Errors in the page go to PlaneSite's log (the window has no console to look at).
 let clientErrs = 0;
 function reportError(msg) {
-  if (clientErrs++ > 20) return;
+  if (!String(msg).startsWith("note") && clientErrs++ > 20) return;
   try { fetch("/api/clientlog", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg: String(msg).slice(0, 2000) }) }); } catch (e) { /* ignore */ }
 }
-window.addEventListener("error", (e) => reportError((e.message || "error") + " at " + (e.filename || "").split("/").pop() + ":" + e.lineno));
-window.addEventListener("unhandledrejection", (e) => reportError("unhandled: " + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)));
+function errContext() {
+  // what the window and map looked like when it happened
+  try {
+    const sz = map ? map.getSize() : null;
+    return " | window " + innerWidth + "x" + innerHeight + " dpr " + devicePixelRatio + " " + document.visibilityState +
+      (map ? " | map " + (sz ? sz.x + "x" + sz.y : "?") + " zoom " + map.getZoom() + " layers " +
+        ["cams", "ortho", "areas", "draft"].filter((k) => layers[k] && map.hasLayer(layers[k])).join(",") : "") +
+      (photos ? " | photos " + photos.points.length : "") + (status && status.progress ? " | stage " + status.progress.stage : "");
+  } catch (err) { return " | context failed: " + err.message; }
+}
+Error.stackTraceLimit = 60;   // a runaway recursion shows its whole cycle, not just 10 frames of it
+function stackOf(err) {
+  if (!err || !err.stack) return "";
+  const lines = err.stack.split("\n").slice(1).map((l) => l.trim());
+  const seen = new Set(), uniq = [];
+  for (const l of lines) if (!seen.has(l)) { seen.add(l); uniq.push(l); }
+  return "\n    " + uniq.slice(0, 25).join("\n    ") + (uniq.length < lines.length ? "\n    (" + lines.length + " frames, " + uniq.length + " different)" : "");
+}
+window.addEventListener("error", (e) => reportError((e.message || "error") + " at " + (e.filename || "").split("/").pop() + ":" + e.lineno + errContext() + stackOf(e.error)));
+window.addEventListener("unhandledrejection", (e) => reportError("unhandled: " + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason) + errContext()));
+document.addEventListener("visibilitychange", () => { if (status && status.running) reportError("note: window " + document.visibilityState + errContext()); });
 
 async function refresh() {
   // whatever happens, the next refresh is scheduled: a failed request or a display error must
