@@ -1,8 +1,8 @@
 {
- "version": "1.6.15",
+ "version": "1.6.16",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.15.zip",
- "sha256": "a2da5bdf4a3d21da229c3b13694d2f9817ec9a97b076f582ef75bb031a0ab8a0",
- "notes": "PlaneSite 1.6.15:\n- Removes a stray file that was accidentally included in 1.6.14. No other changes; see 1.6.14 for the window freeze fix (close the PlaneSite window and start it again after updating so it takes effect).",
+ "app_zip": "updates/planesite-app-1.6.16.zip",
+ "sha256": "43efdbcea2530e81307b0db7b656c75e67ab62426927cc9d59c16574c476e732",
+ "notes": "PlaneSite 1.6.16:\n- After you close the PlaneSite window, its background process now exits within about a minute (it could stay up to 3 minutes after an update restart).\n- Includes the 1.6.14 window fix: close the PlaneSite window and start it again after updating so the window draws without the graphics card.",
  "date": "2026-10-29"
 }
