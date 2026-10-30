@@ -27,6 +27,7 @@
   <symbol id="i-pencil" viewBox="0 0 20 20"><path d="M13.5 3.5l3 3L7 16H4v-3z"/></symbol>
   <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></symbol>
   <symbol id="i-send" viewBox="0 0 20 20"><path d="M3 9.5 17 3l-5 14-2.5-5.5zM9.5 11.5 17 3"/></symbol>
+  <symbol id="i-plan" viewBox="0 0 24 24"><path d="M4 18 9 5l11 3-3 11z"/><path d="M7.5 15l9-6M8.6 12.2l7-4.6M6.4 17.8l9.3-6.2"/></symbol>
   <symbol id="i-fit" viewBox="0 0 20 20"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></symbol>
 </svg>
 
@@ -71,7 +72,7 @@
       <div id="importDetails" hidden>
         <ul class="folders" id="folderList"></ul>
         <div class="addrow" id="addRow">
-          <span>Add more photos to this project:</span>
+          <span id="addLabel">Add more photos to this project:</span>
           <button class="ghost small" id="addFolder"><svg><use href="#i-folder"/></svg>Folder…</button>
           <button class="ghost small" id="addImages"><svg><use href="#i-images"/></svg>Photos…</button>
         </div>
@@ -120,6 +121,8 @@
         <li><label class="check"><input type="checkbox" id="lyrOrtho" checked> Orthomosaic</label>
           <label class="opacity">Opacity<input type="range" id="lyrOrthoOp" min="0.1" max="1" step="0.05" value="1"></label></li>
         <li><label class="check"><input type="checkbox" id="lyrAreas" checked> Areas</label></li>
+        <li><label class="check"><input type="checkbox" id="lyrBase" checked> Satellite map <small class="muted">(USDA NAIP)</small></label>
+          <p class="hint small basenote">Aerial imagery from the USDA, usually 1–3 years old. Needs internet the first time an area is shown; it is then kept with the project.</p></li>
         <li><label class="check"><input type="checkbox" id="lyrCams" checked> Photo positions</label>
           <div class="legend" id="legend"></div></li>
       </ul>
@@ -127,9 +130,17 @@
 
     <section class="pane" id="paneAreas" data-pane="areas" hidden>
       <header class="panehead"><h2>Areas</h2><button class="iconbtn sm" data-closepane aria-label="Close panel"><svg><use href="#i-close"/></svg></button></header>
-      <p class="hint" id="areasLocked">Areas become available once there is an orthomosaic.</p>
+      <p class="hint" id="areasLocked">Areas become available once there are photos or an orthomosaic.</p>
       <div id="areasTools" hidden>
-        <p class="hint">Split the orthomosaic into fields or tiles and export each one as its own GeoTIFF. Mark obstacles (trees, poles, buildings) inside a field for spray drones.</p>
+        <div class="planbox" id="planBox" hidden>
+          <strong>Planning the mapping flight</strong>
+          <ol>
+            <li id="pbDraw">Draw the field on the satellite map (Polygon), or import its boundary.</li>
+            <li id="pbSend">Send it to Pilot 2 with the <svg aria-hidden="true"><use href="#i-send"/></svg> button next to the field.</li>
+            <li id="pbFly">After the flight, <button class="linkish" id="pbPhotos">add the photos</button> and process them.</li>
+          </ol>
+        </div>
+        <p class="hint" id="areasIntro">Split the orthomosaic into fields or tiles and export each one as its own GeoTIFF. Mark obstacles (trees, poles, buildings) inside a field for spray drones.</p>
         <div class="toolgrid">
           <button class="tool" id="toolRect" aria-pressed="false"><svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12"/></svg>Rectangle</button>
           <button class="tool" id="toolPoly" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M3 15 6 4l9 2 2 9z"/></svg>Polygon</button>
@@ -183,6 +194,7 @@
   <!-- ===== map ===== -->
   <section class="mapwrap" id="mapwrap">
     <div id="map"></div>
+    <div class="mapcredit" id="mapCredit" hidden>Imagery: USDA NAIP</div>
     <div class="maptools">
       <button class="mapbtn" id="btnFit" title="Zoom to job"><svg><use href="#i-fit"/></svg>Zoom to job</button>
     </div>
@@ -200,7 +212,8 @@
         <button class="iconbtn" id="dClose" title="Back to the open project" aria-label="Back to the open project"><svg><use href="#i-close"/></svg></button>
       </header>
       <div class="starts">
-        <button class="startbtn primary-start" id="dNew"><svg><use href="#i-plus"/></svg><span><b>New project</b><small>From a flight's folder of photos</small></span></button>
+        <button class="startbtn primary-start" id="dPlan"><svg><use href="#i-plan"/></svg><span><b>Plan a mission</b><small>Start a job before flying: map the field, send it to Pilot 2</small></span></button>
+        <button class="startbtn" id="dNew"><svg><use href="#i-plus"/></svg><span><b>New project from photos</b><small>A flight that's already been flown</small></span></button>
         <button class="startbtn" id="dOpen"><svg><use href="#i-folder"/></svg><span><b>Open project folder…</b><small>A PlaneSite project not listed below</small></span></button>
         <button class="startbtn" id="dTif"><svg><use href="#i-tif"/></svg><span><b>Open a GeoTIFF…</b><small>Split or export an existing orthomosaic</small></span></button>
       </div>
@@ -245,6 +258,42 @@
     <div class="btnrow end">
       <button class="ghost" value="cancel">Cancel</button>
       <button class="primary" id="npCreate" value="create" disabled>Create project</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===== plan a mission ===== -->
+<dialog class="modal wide" id="planDlg" aria-labelledby="planTitle">
+  <form method="dialog" id="planForm">
+    <header class="modalhead"><h2 id="planTitle">Plan a mission</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <p class="hint small">A new job that starts before the flight. Map the field on the satellite map and send it to Pilot 2. After the flight, the photos go into the same job and the field is already there for the spray drone.</p>
+    <p class="step"><span class="num">1</span>Where is the field?</p>
+    <div class="pickrow three">
+      <button type="button" class="source" id="plFile"><svg><use href="#i-import"/></svg><b>Boundary file</b><small>KML, KMZ, Shapefile or GeoJSON from the customer</small></button>
+      <button type="button" class="source" id="plLib"><svg><use href="#i-areas"/></svg><b>Earlier field</b><small>A field from one of your projects</small></button>
+      <button type="button" class="source" id="plFind"><svg><use href="#i-plan"/></svg><b>Find on the map</b><small>Address, coordinates or a map link; draw it yourself</small></button>
+    </div>
+    <div class="plpane" id="plFilePane" hidden>
+      <p class="picked" id="plFileName"></p>
+    </div>
+    <div class="plpane" id="plLibPane" hidden>
+      <input id="plLibQ" type="search" placeholder="Search fields and projects" autocomplete="off" aria-label="Search fields">
+      <ul class="liblist" id="plLibList"></ul>
+    </div>
+    <div class="plpane" id="plFindPane" hidden>
+      <span class="pathrow"><input id="plQ" placeholder="123 Farm Rd, Town, ST  ·  30.4515, -91.1871  ·  Google Maps link" autocomplete="off" spellcheck="false" aria-label="Address, coordinates or map link"><button type="button" class="ghost" id="plGo">Find</button></span>
+      <button type="button" class="linkish small" id="plLast" hidden></button>
+      <p class="picked" id="plFound" hidden></p>
+    </div>
+    <p class="step"><span class="num">2</span>Name the job</p>
+    <label>Job name<input id="plName" autocomplete="off" spellcheck="false" placeholder="Customer or field name"></label>
+    <label>Save in
+      <span class="pathrow"><input id="plParent" spellcheck="false"><button type="button" class="ghost" id="plBrowse">Change…</button></span>
+    </label>
+    <p class="form-error" id="plErr" role="alert"></p>
+    <div class="btnrow end">
+      <button class="ghost" value="cancel">Cancel</button>
+      <button class="primary" id="plCreate" value="create" disabled>Start planning</button>
     </div>
   </form>
 </dialog>

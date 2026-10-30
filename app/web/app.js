@@ -19,6 +19,7 @@ let tool = null;
 let draw = null;
 let pollTimer = null;
 let lastProjectDir = undefined;
+let lastFrame = null;
 let lastResultMtime = null;
 let lastProgressStatus = null;
 let scanWasRunning = false;
@@ -149,18 +150,29 @@ function render() {
     lastProjectDir = dir;
     photos = null; result = null; areas = []; lastResultMtime = null; lastProgressStatus = null;
     clearLayers();
+    lastFrame = null;
     if (p) {
       $("dash").hidden = true;
       loadPhotos(true);
       loadResult(true);
       $("exportDir").value = p.dir + sep() + "exports";
-      setPanel(p.has_result ? "layers" : (status.running ? "process" : "import"));
+      // a job planned before flying opens on its fields; a flown one on its photos or result
+      setPanel(p.has_result ? "layers" : status.running ? "process" : (!p.count && p.has_frame) ? "areas" : "import");
     } else {
       setPanel(null);
       map.setView([0, 0], 2);
       openDash();
     }
   }
+  // the map frame is known (photos read, or a planned job); it can also move once (ortho in another UTM zone)
+  const frame = p ? p.frame : null;
+  if (frame !== lastFrame) {
+    const first = lastFrame === null;
+    lastFrame = frame;
+    drawBase();
+    if (p && p.has_frame) loadAreas().then(() => { if (first && !p.count && !p.has_result) fitJob(); });
+  }
+  updateAreasLock(p);
   if (!p && $("dash").hidden) openDash();
   $("btnProjects").setAttribute("aria-pressed", !$("dash").hidden);
   $("nameWrap").hidden = !p;
@@ -215,9 +227,11 @@ function renderImport(p) {
   }
   scanWasRunning = scanning;
 
-  $("importDetails").hidden = !p || (!p.count && !p.geotiff) || scanning;
+  $("importDetails").hidden = !p || (!p.count && !p.geotiff && !p.planned) || scanning;
   if (!p) return;
   $("addRow").hidden = !!p.geotiff;
+  $("addLabel").textContent = p.count ? "Add more photos to this project:" : "After the flight, add its photos:";
+  document.querySelector(".newhint").hidden = !p.count;
   const ul = $("folderList");
   ul.innerHTML = "";
   if (p.geotiff) {
@@ -259,7 +273,7 @@ function renderImport(p) {
     return;
   }
   const cams = Object.entries(p.cameras || {}).sort((a, b) => b[1] - a[1]);
-  const rows = [["Photos", fmt(p.count)]];
+  const rows = p.count ? [["Photos", fmt(p.count)]] : [];
   if (p.count) {
     rows.push(["RTK fixed", fmt(p.rtk_fixed)]);
     if (p.median_rel_alt) rows.push(["Flight height", fmt(p.median_rel_alt, 0) + " m (" + fmt(p.median_rel_alt * 3.28084, 0) + " ft)"]);
@@ -450,8 +464,14 @@ function renderProcess(p) {
     else if (pr.status === "cancelled" && !running) setErr("procErr", "Processing was stopped. Finished steps are kept and reused next time.");
     else setErr("procErr", "");
     if (lastProgressStatus && lastProgressStatus !== pr.status && pr.status === "done") {
-      toast("Orthomosaic ready.", 5000);
-      loadResult(true);
+      if (p && p.planned && fields().length) {
+        // the planned field is already on the new imagery: go straight to refining it for spraying
+        toast("Orthomosaic ready. Your field is on it: check the outline, mark obstacles, then Export boundaries for the spray drone.", 9000);
+        loadResult(true).then(() => setPanel("areas"));
+      } else {
+        toast("Orthomosaic ready.", 5000);
+        loadResult(true);
+      }
     }
     lastProgressStatus = pr.status;
   }
@@ -605,9 +625,9 @@ async function loadResult(fit) {
   if (!result || !result.ready) {
     result = null;
     $("resultBox").hidden = true;
-    $("areasLocked").hidden = false;
-    $("areasTools").hidden = true;
+    updateAreasLock(status && status.project);
     if (layers.ortho) { layers.ortho.remove(); layers.ortho = null; }
+    if (map) map.setMaxZoom(11);
     return;
   }
   const r = result.report;
@@ -627,8 +647,7 @@ async function loadResult(fit) {
   facts($("resultFacts"), rows);
   $("resultBox").hidden = false;
   $("btnOutputs").hidden = !!r.imported;
-  $("areasLocked").hidden = true;
-  $("areasTools").hidden = false;
+  updateAreasLock(status && status.project);
   if (result.mtime !== lastResultMtime) {
     lastResultMtime = result.mtime;
     drawOrtho();
@@ -748,6 +767,7 @@ function initMap() {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   L.control.scale({ position: "bottomright", imperial: true, metric: true }).addTo(map);
   map.setView([0, 0], 2);
+  map.createPane("base").style.zIndex = 120;    // satellite map, under everything
   map.createPane("ortho").style.zIndex = 150;   // below the areas and markers
   layers.areas = L.layerGroup().addTo(map);
   map.on("mousedown", onMapDown);
@@ -771,8 +791,154 @@ function fitJob() {
     bb = L.latLngBounds([b[1], b[0]], [b[3], b[2]]);
   } else if (photos && photos.points.length) {
     bb = L.latLngBounds(photos.points.map((p) => [p[1], p[0]])).pad(0.15);
+  } else if (areas.length) {
+    bb = L.latLngBounds(areas.flatMap((a) => a.rings[0].map((q) => [q[1], q[0]]))).pad(0.2);
+  } else if (status && status.project && status.project.has_frame) {
+    map.setView([0, 0], 5);     // a planned job without a field yet: the spot that was found
+    return;
   }
-  if (bb && bb.isValid()) map.fitBounds(bb, { padding: [30, 30] });
+  if (bb && bb.isValid()) map.fitBounds(bb, { padding: [30, 30], maxZoom: 8 });
+}
+
+// ------------------------------------------------------------------ satellite base map
+// USDA NAIP imagery, drawn in the job's own map frame by the PlaneSite server (and kept in the
+// project folder), so it lines up with the fields and the orthomosaic.
+function drawBase() {
+  if (!map) return;
+  if (layers.base) { layers.base.remove(); layers.base = null; }
+  const p = status && status.project;
+  $("mapCredit").hidden = true;
+  if (!p || !p.frame) return;
+  layers.base = L.tileLayer("/basemap/{z}/{x}/{y}?o=" + p.frame, {
+    tileSize: 256, minZoom: -4, maxZoom: 22, minNativeZoom: -4, maxNativeZoom: 7, pane: "base",
+    keepBuffer: 2, updateWhenZooming: false, updateInterval: 120 });
+  if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; }
+}
+function updateAreasLock(p) {
+  const ok = !!(p && (p.has_frame || result));
+  $("areasLocked").hidden = ok;
+  $("areasTools").hidden = !ok;
+  if (!p) return;
+  const planning = !!(p.planned && !result);
+  $("planBox").hidden = !planning;
+  $("areasIntro").hidden = planning;
+  $("areasIntro").textContent = result
+    ? (p.planned ? "Adjust the field to the new imagery (pencil), mark obstacles, then Export boundaries for the spray drone."
+                 : "Split the orthomosaic into fields or tiles and export each one as its own GeoTIFF. Mark obstacles (trees, poles, buildings) inside a field for spray drones.")
+    : "Draw fields on the satellite map now; they stay in place when the orthomosaic is ready.";
+  $("toolGrid").disabled = !result;
+  $("toolGrid").title = result ? "" : "Splitting into tiles needs the orthomosaic";
+  $("btnExportAreas").hidden = !result;
+  const f = fields();
+  $("pbDraw").classList.toggle("done", f.length > 0);
+  $("pbSend").classList.toggle("done", f.some((a) => a.pilot2 && a.pilot2.sent));
+  $("pbFly").classList.toggle("done", !!p.count);
+}
+
+// ------------------------------------------------------------------ plan a mission
+const pl = { kind: null, path: null, lib: null, libSel: null, pt: null, nameEdited: false, last: null };
+async function openPlan() {
+  Object.assign(pl, { kind: null, path: null, libSel: null, pt: null, nameEdited: false });
+  $("plName").value = "";
+  $("plQ").value = "";
+  $("plLibQ").value = "";
+  $("plFound").hidden = true;
+  setErr("plErr", "");
+  plMode(null);
+  try { const r = await api("/api/plan/start"); $("plParent").value = r.dir; pl.last = r.last; }
+  catch (e) { $("plParent").value = (status && status.default_dir) || ""; pl.last = null; }
+  $("plLast").hidden = !pl.last;
+  if (pl.last) $("plLast").textContent = "Or start the map near the last job" + (pl.last.name ? " (" + pl.last.name + ")" : "");
+  $("planDlg").showModal();
+}
+function plMode(kind) {
+  pl.kind = kind;
+  for (const [k, id] of [["file", "File"], ["lib", "Lib"], ["find", "Find"]]) {
+    $("pl" + id).setAttribute("aria-pressed", kind === k);
+    $("pl" + id + "Pane").hidden = kind !== k;
+  }
+  plSync();
+}
+function plSuggest(name) { if (!pl.nameEdited && name) { $("plName").value = name; plSync(); } }
+function plSync() {
+  const ready = (pl.kind === "file" && pl.path) || (pl.kind === "lib" && pl.libSel) || (pl.kind === "find" && pl.pt);
+  $("plCreate").disabled = !(ready && $("plName").value.trim());
+}
+async function plPickFile() {
+  const f = await browse("file", "Choose the field boundary (KML, KMZ, Shapefile, GeoJSON)", "");
+  if (!f) { if (!pl.path) plMode(null); return; }
+  pl.path = f;
+  $("plFileName").textContent = f;
+  plMode("file");
+  plSuggest(f.split(/[\\/]/).pop().replace(/\.[^.]+$/, "").replace(/[_]+/g, " ").replace(/\s*boundary$/i, ""));
+}
+async function plOpenLib() {
+  plMode("lib");
+  if (!pl.lib) {
+    $("plLibList").innerHTML = '<li class="empty">Looking through your projects…</li>';
+    try { pl.lib = (await api("/api/fields/library")).fields; } catch (e) { pl.lib = []; }
+  }
+  plRenderLib();
+  $("plLibQ").focus();
+}
+function plRenderLib() {
+  const ul = $("plLibList");
+  const q = $("plLibQ").value.trim().toLowerCase();
+  const rows = pl.lib.filter((f) => !q || (f.name + " " + f.project).toLowerCase().includes(q));
+  ul.innerHTML = "";
+  if (!rows.length) {
+    ul.innerHTML = '<li class="empty"></li>';
+    ul.firstChild.textContent = pl.lib.length ? "No field matches that search." : "No fields in your projects yet. Use a boundary file or find the field on the map.";
+    return;
+  }
+  for (const f of rows.slice(0, 150)) {
+    const li = document.createElement("li");
+    li.innerHTML = '<label><input type="radio" name="plfield"><b></b><small></small><span class="ac"></span></label>';
+    const r = li.querySelector("input");
+    r.checked = !!(pl.libSel && pl.libSel.dir === f.dir && pl.libSel.id === f.id);
+    r.onchange = () => { pl.libSel = { dir: f.dir, id: f.id }; plSuggest(f.name); plSync(); };
+    li.querySelector("b").textContent = f.name;
+    li.querySelector("small").textContent = f.project + " · " + new Date(f.modified * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) +
+      (f.obstacles ? " · " + f.obstacles + (f.obstacles === 1 ? " obstacle" : " obstacles") : "");
+    li.querySelector(".ac").textContent = fmt(f.ac, f.ac < 10 ? 1 : 0) + " ac";
+    ul.append(li);
+  }
+}
+async function plFindGo() {
+  setErr("plErr", "");
+  const q = $("plQ").value.trim();
+  if (!q) return;
+  $("plGo").disabled = true;
+  try {
+    const r = await api("/api/locate", { q }, 30000);
+    pl.pt = { lat: r.lat, lon: r.lon };
+    $("plFound").textContent = "Found: " + r.label;
+    $("plFound").hidden = false;
+  } catch (e) { pl.pt = null; $("plFound").hidden = true; setErr("plErr", e.message); }
+  finally { $("plGo").disabled = false; plSync(); }
+}
+async function plCreate() {
+  setErr("plErr", "");
+  const name = $("plName").value.trim();
+  if (!name) return setErr("plErr", "Enter a name for the job.");
+  const where = pl.kind === "file" ? { kind: "file", path: pl.path }
+    : pl.kind === "lib" ? { kind: "library", dir: pl.libSel.dir, id: pl.libSel.id }
+    : { kind: "point", lat: pl.pt.lat, lon: pl.pt.lon };
+  $("plCreate").disabled = true;
+  try {
+    const r = await api("/api/plan/new", { name, parent: $("plParent").value.trim(), where }, 60000);
+    $("planDlg").close();
+    $("dash").hidden = true;
+    lastProjectDir = undefined;
+    await refresh();
+    setPanel("areas");
+    if (!r.fields) {
+      setTool("poly");
+      toast("Draw the field: click its corners on the satellite map, then click the first corner to finish.", 7000);
+    } else {
+      toast(r.fields === 1 ? "Field ready. Check the outline, then send it to Pilot 2." : r.fields + " fields ready. Check the outlines, then send them to Pilot 2.", 6000);
+    }
+  } catch (e) { setErr("plErr", e.message); plSync(); }
 }
 
 // ------------------------------------------------------------------ tools
@@ -987,7 +1153,7 @@ function cancelEdit() { finishEdit(false); }
 
 // ------------------------------------------------------------------ areas
 function nextName(role) {
-  const word = role === "obstacle" ? "Obstacle " : "Area ";
+  const word = role === "obstacle" ? "Obstacle " : status && status.project && status.project.planned ? "Field " : "Area ";
   let k = areas.filter((a) => (a.role === "obstacle") === (role === "obstacle")).length + 1;
   const names = new Set(areas.map((a) => a.name));
   while (names.has(word + k)) k++;
@@ -1100,6 +1266,7 @@ function renderAreaList() {
   $("btnExportAreas").disabled = !f.length;
   $("btnOutlines").disabled = !f.length;
   const tot = f.reduce((s, a) => s + a.ac, 0);
+  updateAreasLock(status && status.project);
   $("areaCount").textContent = f.length + (f.length === 1 ? " area · " : " areas · ") + fmt(tot, tot < 10 ? 1 : 0) + " ac" +
     (obs.length ? " · " + obs.length + (obs.length === 1 ? " obstacle" : " obstacles") : "");
 }
@@ -1436,7 +1603,7 @@ async function renderDash(force) {
   if (!d.projects.length) {
     const li = document.createElement("li");
     li.className = "empty";
-    li.textContent = "No projects yet. Click New project and choose the folder with a flight's photos.";
+    li.textContent = "No projects yet. Plan a mission to start a job before flying, or start a project from a flight's photos.";
     ul.append(li);
   }
   const cur = status.project && status.project.dir;
@@ -1448,6 +1615,7 @@ async function renderDash(force) {
     b.innerHTML = '<span class="thumb"></span><span class="meta"><strong></strong><small></small><small></small></span>';
     const th = b.querySelector(".thumb");
     if (pr.has_thumb) th.style.backgroundImage = "url('/thumb?dir=" + encodeURIComponent(pr.dir) + "&t=" + Math.round(pr.modified) + "')";
+    else if (pr.planned) { th.textContent = "Mission planned · not flown yet"; th.classList.add("planned"); }
     else th.textContent = pr.has_result ? "" : "Not processed yet";
     b.querySelector("strong").textContent = pr.name;
     const sm = b.querySelectorAll("small");
@@ -1631,6 +1799,33 @@ function wire() {
   $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { if (edit) endEdit(); areas = []; saveAreas(); } };
   $("btnExportAreas").onclick = () => openExport(true);
   $("btnOutlines").onclick = openOutlines;
+  // plan a mission
+  $("dPlan").onclick = openPlan;
+  $("plFile").onclick = plPickFile;
+  $("plLib").onclick = plOpenLib;
+  $("plFind").onclick = () => { plMode("find"); $("plQ").focus(); };
+  $("plGo").onclick = plFindGo;
+  $("plQ").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); plFindGo(); } };
+  $("plLibQ").oninput = plRenderLib;
+  $("plLibQ").onkeydown = (e) => { if (e.key === "Enter") e.preventDefault(); };
+  $("plLast").onclick = () => {
+    pl.pt = { lat: pl.last.lat, lon: pl.last.lon };
+    $("plFound").textContent = "The map starts at the last job (" + (pl.last.name || "") + "). Find the field there and draw it.";
+    $("plFound").hidden = false;
+    plSync();
+  };
+  $("plName").oninput = () => { pl.nameEdited = !!$("plName").value.trim(); plSync(); };
+  $("plName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("plCreate").disabled) plCreate(); } };
+  $("plBrowse").onclick = async () => { const p = await browse("folder", "Save the job in", $("plParent").value); if (p) $("plParent").value = p; };
+  $("planForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); plCreate(); } };
+  $("pbPhotos").onclick = () => setPanel("import");
+  try { $("lyrBase").checked = localStorage.getItem("planesite.base") !== "off"; } catch (e) { /* default on */ }
+  $("lyrBase").onchange = () => {
+    try { localStorage.setItem("planesite.base", $("lyrBase").checked ? "on" : "off"); } catch (e) { /* ignore */ }
+    if (!layers.base) return;
+    if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; }
+    else { layers.base.remove(); $("mapCredit").hidden = true; }
+  };
   document.querySelectorAll("input[name=bndtarget]").forEach((r) => (r.onchange = syncOutlines));
   $("bndAll").onchange = () => { document.querySelectorAll("#bndList input").forEach((c) => (c.checked = $("bndAll").checked)); syncOutlines(); };
   $("bndBrowse").onclick = async () => { const p = await browse("folder", "Save boundary files in", $("bndDir").value); if (p) $("bndDir").value = p; };

@@ -199,6 +199,8 @@ def project_summary():
     s = P.summarize(S.proj)
     s.update({"name": S.proj["name"], "dir": S.dir, "folders": S.proj.get("folders", []),
               "settings": S.proj["settings"], "has_result": S.ortho_path() is not None,
+              "has_frame": S.origin is not None, "planned": bool(S.proj.get("plan")),
+              "frame": "%d_%d_%d" % tuple(S.origin) if S.origin else None,
               "geotiff": (S.proj.get("geotiff") or {}).get("path")})
     return s
 
@@ -218,7 +220,15 @@ def recent_projects():
                 name = json.loads('"%s"' % m.group(1))
         except Exception:
             pass
-        out.append({"dir": d, "name": name, "modified": os.path.getmtime(pf),
+        planned = False
+        try:
+            if os.path.getsize(pf) < 200000:
+                with open(pf, "r", encoding="utf-8") as f:
+                    pj = json.load(f)
+                planned = bool(pj.get("plan")) and not pj.get("photos")
+        except Exception:
+            pass
+        out.append({"dir": d, "name": name, "modified": os.path.getmtime(pf), "planned": planned,
                     "has_result": os.path.exists(os.path.join(d, "outputs", "report.json")),
                     "has_thumb": os.path.exists(os.path.join(d, "outputs", "preview.png"))})
     return out
@@ -235,6 +245,7 @@ def open_project(d):
         S.proj = P.load(d)
         S.origin = None
         S.compute_origin()
+        remember_place()
         S.remember(d)
         S.tile_local = threading.local()
 
@@ -256,7 +267,8 @@ def scan_worker(folder, recursive, files=None):
             if folder and folder not in S.proj["folders"]:
                 S.proj["folders"].append(folder)
             S.proj["selection"] = None
-            S.proj.pop("map_origin", None)
+            if not S.proj.get("plan"):       # a planned job keeps the frame its fields were drawn in
+                S.proj.pop("map_origin", None)
             S.compute_origin()
             S.save()
         small = [e for e in errors if e[1].startswith("too small")]
@@ -586,6 +598,158 @@ def areas_from_client(lst):
     return out
 
 
+# ------------------------------------------------------------------- plan before flying
+def remember_place():
+    """Keep where the open job is, as the starting point for planning the next one."""
+    if not S.origin or not S.proj:
+        return
+    from .geo import Geo
+    lon, lat = Geo(S.origin[0]).to_ll(S.origin[1], S.origin[2])
+    S.cfg["last_place"] = {"lon": lon, "lat": lat, "name": S.proj.get("name", "")}
+
+
+_FIELDS_CACHE = {}
+
+
+def _project_fields(d):
+    """Fields (not obstacles) of the project in folder d, with their obstacles, in lon/lat."""
+    try:
+        key = (os.path.getmtime(P.project_file(d)), os.path.getmtime(os.path.join(d, "areas.json")))
+    except OSError:
+        key = None
+    hit = _FIELDS_CACHE.get(d)
+    if key and hit and hit[0] == key:
+        return hit[1]
+    res = _project_fields_read(d)
+    if key:
+        _FIELDS_CACHE[d] = (key, res)
+    return res
+
+
+def _project_fields_read(d):
+    from .export import obstacle_parents, area_stats
+    from .geo import Geo
+    try:
+        with open(P.project_file(d), "r", encoding="utf-8") as f:
+            proj = json.load(f)
+        with open(os.path.join(d, "areas.json"), "r", encoding="utf-8") as f:
+            areas = json.load(f)
+    except Exception:
+        return None, []
+    o = proj.get("map_origin") or {}
+    epsg = (proj.get("geotiff") or {}).get("epsg") or o.get("epsg")
+    if not epsg or not areas:
+        return proj, []
+    g = Geo(epsg)
+    par = obstacle_parents(areas)
+    out = []
+    for a in areas:
+        if a.get("role") == "obstacle":
+            continue
+        obs = [b for b in areas if par.get(b["id"]) == a["id"]]
+        out.append({"area": a, "obstacles": obs, "epsg": int(epsg), "ac": area_stats(a)["ac"],
+                    "center": g.to_ll(*np.mean(np.array(a["rings"][0], dtype=float), axis=0))})
+    return proj, out
+
+
+def field_library():
+    """Fields from earlier projects (recent ones and everything in the projects folder), newest first."""
+    seen, dirs = set(), []
+    for d in S.cfg.get("recent", []):
+        if os.path.normcase(d) not in seen:
+            seen.add(os.path.normcase(d)); dirs.append(d)
+    root = S.cfg.get("projects_dir") or default_projects_dir()
+    try:
+        for n in os.listdir(root):
+            d = os.path.join(root, n)
+            if os.path.normcase(d) not in seen and os.path.isfile(P.project_file(d)):
+                seen.add(os.path.normcase(d)); dirs.append(d)
+    except OSError:
+        pass
+    out = []
+    for d in dirs:
+        if not os.path.isfile(os.path.join(d, "areas.json")):
+            continue
+        proj, flds = _project_fields(d)
+        mt = os.path.getmtime(os.path.join(d, "areas.json"))
+        for f in flds:
+            if f["area"].get("kind") == "grid":
+                continue      # tiles of an ortho, not fields
+            out.append({"dir": d, "project": (proj or {}).get("name") or os.path.basename(d), "id": f["area"]["id"],
+                        "name": f["area"]["name"], "ac": round(float(f["ac"]), 2), "obstacles": len(f["obstacles"]),
+                        "lon": round(f["center"][0], 6), "lat": round(f["center"][1], 6), "modified": mt})
+    out.sort(key=lambda r: -r["modified"])
+    return out[:300]
+
+
+def plan_project(b):
+    """A job that starts with planning the mapping flight: a project with no photos yet, whose map
+    frame comes from where the field is. Photos are added after the flight."""
+    from . import basemap
+    from .export import read_boundaries, to_ortho_crs
+    from pyproj import Transformer
+    name = (b.get("name") or "").strip()
+    if not name:
+        raise ApiError("Enter a name for the job.")
+    w = b.get("where") or {}
+    kind = w.get("kind")
+    new_areas = []
+    if kind == "file":
+        p = w.get("path") or ""
+        if not os.path.isfile(p):
+            raise ApiError("File not found: %s" % p)
+        bnds, crs = read_boundaries(p)
+        if not bnds:
+            raise ApiError("No field outlines found in that file.")
+        ll = to_ortho_crs([x for x in bnds if x.get("role") != "obstacle"] or bnds, crs, 4326)
+        origin = basemap.origin_for(*basemap.lonlat_center([r for a in ll for r in a["rings"]]))
+        new_areas = to_ortho_crs(bnds, crs, origin["epsg"])
+        k = 0
+        for a in new_areas:
+            if a.get("role") == "obstacle":
+                k += 1
+                if re.match(r"^(Area \d+|.* \(\d+\))$", a.get("name") or ""):
+                    a["name"] = "Obstacle %d" % k
+    elif kind == "library":
+        _, flds = _project_fields(w.get("dir") or "")
+        f = next((x for x in flds if x["area"]["id"] == w.get("id")), None)
+        if f is None:
+            raise ApiError("That field is no longer in its project.")
+        origin = basemap.origin_for(*f["center"])
+        tr = Transformer.from_crs(f["epsg"], origin["epsg"], always_xy=True)
+        from .export import new_id
+        for a in [f["area"]] + f["obstacles"]:
+            c = {"id": new_id(), "name": a["name"], "kind": a.get("kind", "drawn"),
+                 "rings": [[list(map(float, tr.transform(p[0], p[1]))) for p in r] for r in a["rings"]]}
+            if a.get("role") == "obstacle":
+                c["role"] = "obstacle"
+            elif (a.get("pilot2") or {}).get("settings"):
+                c["pilot2"] = {"settings": a["pilot2"]["settings"]}      # same flight settings, not sent yet
+            new_areas.append(c)
+    elif kind == "point":
+        try:
+            lat, lon = float(w["lat"]), float(w["lon"])
+        except (KeyError, TypeError, ValueError):
+            raise ApiError("Find the field's location first.")
+        origin = basemap.origin_for(lon, lat)
+    else:
+        raise ApiError("Choose where the field is.")
+    parent = b.get("parent") or S.cfg.get("projects_dir") or default_projects_dir()
+    if S.running():
+        raise ApiError("Processing is running. Wait for it to finish before starting another job.")
+    d = unique_project_dir(parent, name)
+    P.create_project(d, name)
+    proj = P.load(d)
+    proj["map_origin"] = origin
+    proj["plan"] = {"created": time.strftime("%Y-%m-%d %H:%M"), "from": kind}
+    P.save(d, proj)
+    S.cfg["projects_dir"] = parent
+    open_project(d)
+    if new_areas:
+        save_areas(new_areas)
+    return {"dir": d, "fields": sum(1 for a in new_areas if a.get("role") != "obstacle")}
+
+
 # ------------------------------------------------------------------- Pilot 2
 def pilot2_settings():
     from . import pilot2
@@ -633,7 +797,9 @@ def _pilot2_area(b):
         s, ring, ring_ll, est, notes = pilot2.prepare(area, S.origin[0], given)
     except ValueError as e:
         raise ApiError(str(e))
-    default_name = (area.get("pilot2") or {}).get("name") or "%s - %s" % (S.proj["name"], area["name"])
+    n_fields = sum(1 for a in load_areas() if a.get("role") != "obstacle")
+    default_name = (area.get("pilot2") or {}).get("name") or (
+        S.proj["name"] if n_fields == 1 else "%s - %s" % (S.proj["name"], area["name"]))
     name = pilot2.clean_name(b.get("name") or default_name)
     return area, s, ring_ll, est, notes, name
 
@@ -684,10 +850,21 @@ def pilot2_send(b):
 
 
 def check_ortho_crs():
-    """Areas are stored in the ortho CRS; the map frame uses the same UTM zone."""
+    """Areas are stored in the ortho CRS; the map frame uses the same UTM zone. A job planned before
+    the flight can get its orthomosaic in another UTM zone (a field near a zone line): then the
+    fields and the map frame move into the ortho's zone, staying on the same ground."""
     rep = S.report()
     if rep and S.origin and rep.get("epsg") != S.origin[0]:
-        S.proj["map_origin"] = {"epsg": rep["epsg"], "e": S.origin[1], "n": S.origin[2]}
+        from pyproj import Transformer
+        old, new = S.origin[0], int(rep["epsg"])
+        tr = Transformer.from_crs(old, new, always_xy=True)
+        e, n = tr.transform(S.origin[1], S.origin[2])
+        areas = load_areas()
+        for a in areas:
+            a["rings"] = [[list(map(float, tr.transform(p[0], p[1]))) for p in r] for r in a["rings"]]
+        if areas:
+            save_areas(areas)
+        S.proj["map_origin"] = {"epsg": new, "e": int(math.floor(e)), "n": int(math.floor(n))}
         S.save()
         S.compute_origin()
 
@@ -1014,6 +1191,16 @@ class Handler(BaseHTTPRequestHandler):
                 data, ctype = res or (EMPTY_PNG, "image/png")
                 # the URL carries the ortho's modification time, so a tile never changes
                 return self._send(200, data, ctype, {"Cache-Control": "max-age=31536000, immutable"})
+            m = re.match(r"^/basemap/(-?\d+)/(-?\d+)/(-?\d+)$", path)
+            if m:
+                from . import basemap
+                res = None
+                if S.dir and S.origin:
+                    res = basemap.tile(os.path.join(S.dir, "basemap"), int(m.group(1)), int(m.group(2)),
+                                       int(m.group(3)), S.origin, R0)
+                if not res:
+                    return self._send(200, EMPTY_PNG, "image/png", {"Cache-Control": "no-store"})
+                return self._send(200, res[0], res[1], {"Cache-Control": "max-age=31536000, immutable"})
             if path == "/thumb":
                 d = (q.get("dir") or [""])[0]
                 ok = any(os.path.normcase(d) == os.path.normcase(r) for r in S.cfg.get("recent", []))
@@ -1077,6 +1264,11 @@ class Handler(BaseHTTPRequestHandler):
                     "running": S.running() if S.dir else False, "progress": progress_state(),
                     "scan": S.scan, "export": S.export, "platform": sys.platform,
                     "update": dict(updater.state)}
+        if path == "/api/plan/start":
+            lp = S.cfg.get("last_place")
+            return {"last": lp, "dir": S.cfg.get("projects_dir") or default_projects_dir()}
+        if path == "/api/fields/library":
+            return {"fields": field_library()}
         if path == "/api/projects":
             return {"projects": recent_projects(), "dir": S.cfg.get("projects_dir") or default_projects_dir()}
         if path == "/api/pilot2/settings":
@@ -1181,6 +1373,14 @@ class Handler(BaseHTTPRequestHandler):
             S.cfg["projects_dir"] = parent
             open_project(d)
             return {"dir": d}
+        if path == "/api/plan/new":
+            return plan_project(b)
+        if path == "/api/locate":
+            from . import basemap
+            try:
+                return basemap.locate(b.get("q"))
+            except ValueError as e:
+                raise ApiError(str(e))
         if path == "/api/project/start":
             d = quick_start(b.get("folder"), b.get("files") or None, b.get("recursive", True), b.get("parent"),
                             b.get("name"))
@@ -1237,7 +1437,8 @@ class Handler(BaseHTTPRequestHandler):
                                 and os.path.normcase(os.path.dirname(m["path"])) != nf]
             S.proj["folders"] = [f for f in S.proj["folders"] if f != folder]
             S.proj["selection"] = None
-            S.proj.pop("map_origin", None)
+            if not S.proj.get("plan"):       # a planned job keeps the frame its fields were drawn in
+                S.proj.pop("map_origin", None)
             S.compute_origin()
             S.save()
             return {}
