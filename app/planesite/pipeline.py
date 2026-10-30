@@ -614,12 +614,28 @@ def _run(project_dir, prog):
 
     sig_h = np.where(rtk, 0.03, 2.0)
     sig_v = np.where(rtk, 0.05, 4.0)
+    # Position accuracy from the photo (DJI's RtkStd*, which PPK tools also write): fixed photos are
+    # held to it; float / unresolved photos (RtkFlag 34 and up, e.g. PPK forward and backward runs
+    # that disagree by a few cm) too, but never tighter than 10 cm / 15 cm and never looser than
+    # the 2 m / 4 m used without one. Plain GPS photos keep 2 m / 4 m.
+    float_ok = np.array([(m.get("rtk_flag") or 0) >= 34 for m in meta]) & ~rtk
+    n_float_std = 0
     for i, m in enumerate(meta):
         st = m.get("rtk_std") or [None, None, None]
-        if rtk[i] and st[0] is not None and st[1] is not None:
-            sig_h[i] = max(0.02, 1.5 * max(st[0] or 0, st[1] or 0))
-        if rtk[i] and st[2] is not None:
-            sig_v[i] = max(0.03, 1.5 * (st[2] or 0))
+        has_h = st[0] is not None and st[1] is not None and max(st[0], st[1]) > 0
+        has_v = st[2] is not None and st[2] > 0
+        if rtk[i]:
+            if has_h:
+                sig_h[i] = max(0.02, 1.5 * max(st[0], st[1]))
+            if has_v:
+                sig_v[i] = max(0.03, 1.5 * st[2])
+        elif float_ok[i] and has_h and has_v:
+            sig_h[i] = min(2.0, max(0.10, 1.5 * max(st[0], st[1])))
+            sig_v[i] = min(4.0, max(0.15, 1.5 * st[2]))
+            n_float_std += 1
+    if n_float_std:
+        log("Position accuracy: %d RTK-float photos held to their recorded accuracy (median %.2f m horizontal)"
+            % (n_float_std, float(np.median(sig_h[float_ok & (sig_h < 2.0)])) if (float_ok & (sig_h < 2.0)).any() else 2.0))
     Csig = np.c_[sig_h, sig_h, sig_v]
     sigma_px = max(1.0, 0.5 * reduce)
     rec = Reconstruction(R0.copy(), Cgps.copy(), intr0.copy(), cam_group, W, H, Cgps, Csig,
@@ -655,6 +671,11 @@ def _run(project_dir, prog):
     dC = rec.C - Cgps
     gps_res = np.sqrt(np.mean(dC[aligned] ** 2, axis=0)) if aligned.any() else np.zeros(3)
     log("Camera position adjustment RMS: E %.3f m, N %.3f m, U %.3f m" % tuple(gps_res))
+    for lab, sel in (("RTK-fixed", rtk), ("not fixed", ~rtk)):
+        sel = sel & aligned
+        if sel.any() and (~rtk).any() and rtk.any():
+            r = np.sqrt(np.mean(dC[sel] ** 2, axis=0))
+            log("  %s photos (%d): E %.3f m, N %.3f m, U %.3f m" % ((lab, int(sel.sum())) + tuple(r)))
 
     # dense points from all tracks
     prog.set("alignment", 0.9, "Triangulating surface points", force=True)
