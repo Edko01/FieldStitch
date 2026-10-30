@@ -137,6 +137,15 @@
           <button class="tool" id="toolImport"><svg viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M3 17h14"/></svg>Import</button>
         </div>
         <p class="hint" id="toolHint"></p>
+        <div class="editbar" id="editBar" hidden>
+          <div class="editbar-head"><strong id="editLabel"></strong><span class="size" id="editSize"></span></div>
+          <p class="hint">Drag a corner to move it. Drag or click a small middle dot to add a corner. Right-click a corner, or click it and press Delete, to remove it. Ctrl+Z undoes.</p>
+          <div class="btnrow end">
+            <button class="ghost small" id="editUndo" disabled>Undo</button>
+            <button class="ghost small" id="editCancel">Cancel</button>
+            <button class="primary small" id="editDone">Done</button>
+          </div>
+        </div>
         <form class="gridform" id="gridForm" hidden>
           <fieldset class="seg two">
             <legend>Split by</legend>

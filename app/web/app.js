@@ -736,6 +736,7 @@ function initMap() {
   map.on("movestart zoomstart", () => { prefetch.queue = []; clearTimeout(prefetch.timer); });   // the view comes first
 }
 function clearLayers() {
+  if (edit) endEdit();
   for (const k of ["cams", "ortho", "draft"]) if (layers[k]) { layers[k].remove(); layers[k] = null; }
   if (layers.areas) layers.areas.clearLayers();
   renderAreaList();
@@ -756,9 +757,10 @@ function fitJob() {
 const TOOL_HINTS = {
   select: "Drag a box around the photos you want to process.",
   rect: "Drag on the map to draw a rectangle.",
-  poly: "Click to place corners. Click the first corner or double-click to finish. Backspace removes the last corner, Esc cancels.",
+  poly: "Click to place corners; drag to move the map. Click the first corner or double-click to finish. Backspace removes the last corner, Esc cancels.",
 };
 function setTool(t) {
+  if (edit && t) finishEdit(true);
   tool = tool === t ? null : t;
   cancelDraft();
   $("toolRect").setAttribute("aria-pressed", tool === "rect");
@@ -767,8 +769,10 @@ function setTool(t) {
   $("toolHint").textContent = tool && tool !== "select" ? TOOL_HINTS[tool] : "";
   if (tool === "select") toast(TOOL_HINTS.select);
   map.getContainer().classList.toggle("cursor-cross", !!tool);
-  if (tool) { map.dragging.disable(); map.doubleClickZoom.disable(); }
-  else { map.dragging.enable(); map.doubleClickZoom.enable(); }
+  // Rectangles and the photo selection box are drawn by dragging, so the map can't pan then.
+  // Polygons are drawn by clicking: dragging still pans the map (Leaflet sends no click after a drag).
+  if (tool === "rect" || tool === "select") map.dragging.disable(); else map.dragging.enable();
+  if (tool) map.doubleClickZoom.disable(); else if (!edit) map.doubleClickZoom.enable();
 }
 function cancelDraft() {
   draw = null;
@@ -804,6 +808,7 @@ async function onMapUp(e) {
   addArea({ name: nextName(), kind: "drawn", rings: [[[w, s], [en, s], [en, n], [w, n], [w, s]]] });
 }
 function onMapClick(e) {
+  if (edit && !tool) { if (edit.sel) { edit.sel = null; renderEdit(); } return; }
   if (tool !== "poly") return;
   if (!draw) {
     draw = { pts: [e.latlng] };
@@ -829,6 +834,12 @@ function finishPoly() {
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea")) return;
+  if (edit) {
+    if (e.key === "Escape") { cancelEdit(); e.preventDefault(); return; }
+    if (e.key === "Enter") { finishEdit(true); e.preventDefault(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { undoEdit(); e.preventDefault(); return; }
+    if ((e.key === "Delete" || e.key === "Backspace") && edit.sel) { removeCorner(edit.sel[0], edit.sel[1]); e.preventDefault(); return; }
+  }
   if (e.key === "Escape") { if (draw) cancelDraft(); else if (tool) setTool(null); else if (!$("dash").hidden && status.project) $("dash").hidden = true; }
   if (e.key === "Backspace" && tool === "poly" && draw && draw.pts.length > 1) {
     draw.pts.pop();
@@ -836,6 +847,115 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
   }
 });
+
+// ------------------------------------------------------------------ edit an area outline
+// Corners are kept per ring without the closing point while editing; the map units are metres.
+let edit = null;   // { id, orig, rings, undo, sel, group }
+const ringsOpen = (rings) => rings.map((r) => {
+  const c = r.map((p) => [p[0], p[1]]);
+  if (c.length > 1 && c[0][0] === c[c.length - 1][0] && c[0][1] === c[c.length - 1][1]) c.pop();
+  return c;
+});
+const ringsClosed = (rings) => rings.map((r) => [...r.map((p) => [p[0], p[1]]), [r[0][0], r[0][1]]]);
+function ringAreaM2(r) {
+  let s = 0;
+  for (let i = 0; i < r.length; i++) { const a = r[i], b = r[(i + 1) % r.length]; s += a[0] * b[1] - b[0] * a[1]; }
+  return Math.abs(s) / 2;
+}
+function editAreaHa() {
+  if (!edit) return 0;
+  return Math.max(0, edit.rings.reduce((s, r, i) => s + (i === 0 ? 1 : -1) * ringAreaM2(r), 0)) / 1e4;
+}
+function startEdit(id) {
+  if (edit && edit.id === id) return;
+  if (edit) finishEdit(true);
+  if (tool) setTool(null);
+  const a = areas.find((x) => x.id === id);
+  if (!a || !map) return;
+  edit = { id, orig: JSON.parse(JSON.stringify(a.rings)), rings: ringsOpen(a.rings), undo: [], sel: null,
+           group: L.layerGroup().addTo(map) };
+  map.doubleClickZoom.disable();
+  $("editBar").hidden = false;
+  $("editLabel").textContent = "Editing " + a.name;
+  focusArea(id, true);
+  renderAreaList();
+  renderEdit();
+}
+function pushUndo() {
+  edit.undo.push(JSON.parse(JSON.stringify(edit.rings)));
+  if (edit.undo.length > 100) edit.undo.shift();
+  $("editUndo").disabled = false;
+}
+function undoEdit() {
+  if (!edit || !edit.undo.length) return;
+  edit.rings = edit.undo.pop();
+  edit.sel = null;
+  $("editUndo").disabled = !edit.undo.length;
+  renderEdit();
+}
+function removeCorner(ri, k) {
+  if (!edit) return;
+  const r = edit.rings[ri];
+  if (r.length <= 3) {
+    if (ri > 0) { pushUndo(); edit.rings.splice(ri, 1); edit.sel = null; renderEdit(); }  // a hole: remove it
+    else toast("An area needs at least 3 corners.");
+    return;
+  }
+  pushUndo();
+  r.splice(k, 1);
+  edit.sel = null;
+  renderEdit();
+}
+function editShape() {
+  const a = areas.find((x) => x.id === edit.id);
+  if (a && a._layer) a._layer.setLatLngs(edit.rings.map((r) => r.map((p) => [p[1], p[0]])));
+  const ha = editAreaHa(), ac = ha * 2.47105;
+  $("editSize").textContent = fmt(ac, ac < 10 ? 2 : 1) + " ac (" + fmt(ha, 2) + " ha)";
+}
+function renderEdit() {
+  if (!edit) return;
+  edit.group.clearLayers();
+  editShape();
+  const icon = (cls) => L.divIcon({ className: "vtx" + cls, iconSize: null });
+  edit.rings.forEach((r, ri) => {
+    r.forEach((p, k) => {
+      const sel = edit.sel && edit.sel[0] === ri && edit.sel[1] === k;
+      const m = L.marker([p[1], p[0]], { icon: icon(sel ? " sel" : ""), draggable: true, keyboard: false, zIndexOffset: 1000 });
+      m.on("dragstart", () => { pushUndo(); edit.sel = [ri, k]; });
+      m.on("drag", (e) => { const ll = e.target.getLatLng(); r[k] = [ll.lng, ll.lat]; editShape(); });
+      m.on("dragend", () => renderEdit());
+      m.on("click", (e) => { L.DomEvent.stop(e); edit.sel = [ri, k]; renderEdit(); });
+      m.on("contextmenu", (e) => { L.DomEvent.stop(e); removeCorner(ri, k); });
+      m.addTo(edit.group);
+      // middle dot to the next corner: drag (or click) to add a corner there
+      const q = r[(k + 1) % r.length];
+      const mid = L.marker([(p[1] + q[1]) / 2, (p[0] + q[0]) / 2], { icon: icon(" mid"), draggable: true, keyboard: false, zIndexOffset: 900 });
+      let added = false;
+      const add = () => { if (!added) { pushUndo(); r.splice(k + 1, 0, [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]); added = true; } };
+      mid.on("dragstart", add);
+      mid.on("drag", (e) => { const ll = e.target.getLatLng(); r[k + 1] = [ll.lng, ll.lat]; editShape(); });
+      mid.on("dragend", () => { edit.sel = [ri, k + 1]; renderEdit(); });
+      mid.on("click", (e) => { L.DomEvent.stop(e); add(); edit.sel = [ri, k + 1]; renderEdit(); });
+      mid.addTo(edit.group);
+    });
+  });
+}
+function endEdit() {
+  if (!edit) return;
+  edit.group.remove();
+  edit = null;
+  map.doubleClickZoom.enable();
+  $("editBar").hidden = true;
+}
+async function finishEdit(save) {
+  if (!edit) return;
+  const a = areas.find((x) => x.id === edit.id);
+  const changed = save && a && JSON.stringify(ringsClosed(edit.rings)) !== JSON.stringify(edit.orig);
+  if (a) a.rings = save ? ringsClosed(edit.rings) : edit.orig;
+  endEdit();
+  if (changed) await saveAreas(); else drawAreas();
+}
+function cancelEdit() { finishEdit(false); }
 
 // ------------------------------------------------------------------ areas
 function nextName() {
@@ -868,10 +988,12 @@ function drawAreas() {
     const poly = L.polygon(ll, { color: "#E9B20F", weight: 2.5, fillColor: "#E9B20F", fillOpacity: 0.08 });
     poly.bindTooltip(a.name, { permanent: true, direction: "center", className: "area-label" });
     poly.on("click", (e) => { if (!tool) { L.DomEvent.stop(e); setPanel("areas"); focusArea(a.id); } });
+    poly.on("dblclick", (e) => { if (!tool) { L.DomEvent.stop(e); setPanel("areas"); startEdit(a.id); } });
     poly.addTo(layers.areas);
     a._layer = poly;
   }
   renderAreaList();
+  if (edit) renderEdit();
 }
 function renderAreaList() {
   const ul = $("areaList");
@@ -894,7 +1016,14 @@ function renderAreaList() {
     del.textContent = "×";
     del.title = "Remove area";
     del.setAttribute("aria-label", "Remove " + a.name);
-    del.onclick = () => { areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
+    del.onclick = () => { if (edit && edit.id === a.id) cancelEdit(); areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
+    const ed = document.createElement("button");
+    ed.className = "edit";
+    ed.innerHTML = '<svg aria-hidden="true"><use href="#i-pencil"/></svg>';
+    ed.title = "Edit outline";
+    ed.setAttribute("aria-label", "Edit the outline of " + a.name);
+    ed.setAttribute("aria-pressed", !!(edit && edit.id === a.id));
+    ed.onclick = () => (edit && edit.id === a.id ? finishEdit(true) : startEdit(a.id));
     const send = document.createElement("button");
     const sentAt = a.pilot2 && a.pilot2.sent && a.pilot2.sent.at;
     send.className = "send" + (sentAt ? " sent" : "");
@@ -902,7 +1031,7 @@ function renderAreaList() {
     send.title = sentAt ? "Send to Pilot 2 (last sent " + sentAt + ")" : "Send to Pilot 2";
     send.setAttribute("aria-label", "Send " + a.name + " to Pilot 2");
     send.onclick = () => openPilot2(a.id);
-    li.append(nm, sz, send, del);
+    li.append(nm, sz, ed, send, del);
     ul.append(li);
   }
   $("areaHead").hidden = !areas.length;
@@ -1314,7 +1443,7 @@ function wire() {
       toast("Imported " + r.added + (r.added === 1 ? " boundary." : " boundaries."));
     } catch (e) { toast(e.message, 6000); }
   };
-  $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { areas = []; saveAreas(); } };
+  $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { if (edit) endEdit(); areas = []; saveAreas(); } };
   $("btnExportAreas").onclick = () => openExport(true);
   $("btnKml").onclick = async () => {
     try { const r = await api("/api/areas/kml", { out_dir: $("exportDir").value.trim() }); toast("Saved " + r.path, 6000); }
@@ -1333,6 +1462,10 @@ function wire() {
   $("p2Save").onclick = () => p2Go(false);
   $("p2Form").onsubmit = (e) => { if (e.submitter && e.submitter.value === "send") { e.preventDefault(); p2Go(true); } };
   $("p2Form").onkeydown = (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.preventDefault(); };
+  // editing an area outline
+  $("editDone").onclick = () => finishEdit(true);
+  $("editCancel").onclick = () => cancelEdit();
+  $("editUndo").onclick = () => undoEdit();
 
   $("expForm").onsubmit = (e) => {
     if (e.submitter && e.submitter.value === "export") { e.preventDefault(); startExport(); }

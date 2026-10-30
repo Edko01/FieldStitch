@@ -1,8 +1,8 @@
 {
- "version": "1.6.12",
+ "version": "1.6.13",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.12.zip",
- "sha256": "382361b05eef80f5986f2a3c5081e9e28402561a5502f0e00458d86cd3a4ed76",
- "notes": "PlaneSite 1.6.12:\n- Better use of PPK results. Photos your PPK tool couldn't fully fix (float, or forward and backward runs that disagree) are now held to the accuracy the tool recorded for them, instead of being allowed to drift up to 2 m. Fixed photos are unchanged. On a PPK test flight the unfixed photos stayed within about 4 cm of their PPK positions instead of wandering about 80 cm, with the photos fitting together just as well.\n- The log now shows the camera position adjustment separately for RTK-fixed and not-fixed photos.",
+ "app_zip": "updates/planesite-app-1.6.13.zip",
+ "sha256": "a7496d271fc2f1bb68b053eecdb62ccec7b5f5eb71976b46b524c813b55a8a5e",
+ "notes": "PlaneSite 1.6.13:\n- Edit area outlines. Click the pencil next to an area (or double-click the area on the map) to show its corners: drag a corner to move it, drag or click a small middle dot to add a corner, right-click a corner (or click it and press Delete) to remove it. Ctrl+Z undoes, Done (Enter) saves, Cancel (Esc) puts it back. The acreage updates as you edit. Works on drawn, grid and imported areas.\n- While drawing a polygon you can now drag the map to move around; only clicks place corners.",
  "date": "2026-10-29"
 }
