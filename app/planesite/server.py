@@ -548,14 +548,20 @@ def save_areas(areas):
 
 
 def areas_for_client(areas):
-    from .export import area_stats
+    from .export import area_stats, obstacle_parents
     epsg, e0, n0 = S.origin
+    parents = obstacle_parents(areas)
     out = []
     for a in areas:
         rings = [[[round(p[0] - e0, 3), round(p[1] - n0, 3)] for p in r] for r in a["rings"]]
         st = area_stats(a)
-        out.append({"id": a["id"], "name": a["name"], "kind": a.get("kind", ""), "rings": rings,
-                    "ha": float(st["ha"]), "ac": float(st["ac"])})
+        out.append({"id": a["id"], "name": a["name"], "kind": a.get("kind", ""), "role": a.get("role", "field"),
+                    "rings": rings, "ha": float(st["ha"]), "ac": float(st["ac"]),
+                    "ft2": round(float(st["ha"]) * 107639.104, 0)})
+        if a.get("role") == "obstacle":
+            out[-1]["parent"] = parents.get(a["id"])
+        else:
+            out[-1]["obstacles"] = sum(1 for v in parents.values() if v == a["id"])
         if a.get("pilot2"):
             out[-1]["pilot2"] = {k: a["pilot2"][k] for k in ("name", "sent") if k in a["pilot2"]}
     return out
@@ -572,8 +578,10 @@ def areas_from_client(lst):
             if r[0] != r[-1]:
                 r.append(list(r[0]))
         aid = a.get("id") or new_id()
-        new = {k: v for k, v in old.get(aid, {}).items() if k not in ("id", "name", "kind", "rings")}
+        new = {k: v for k, v in old.get(aid, {}).items() if k not in ("id", "name", "kind", "rings", "role")}
         new.update({"id": aid, "name": a.get("name") or "Area", "kind": a.get("kind", "drawn"), "rings": rings})
+        if a.get("role") == "obstacle":
+            new["role"] = "obstacle"
         out.append(new)
     return out
 
@@ -616,6 +624,8 @@ def _pilot2_area(b):
     area = next((a for a in load_areas() if a["id"] == b.get("id")), None)
     if area is None:
         raise ApiError("That field no longer exists.")
+    if area.get("role") == "obstacle":
+        raise ApiError("Obstacles can't be sent as a mapping mission. Send the field they are in.")
     given = dict(S.cfg.get("pilot2") or {})
     given.update((area.get("pilot2") or {}).get("settings") or {})
     given.update(b.get("settings") or {})
@@ -713,7 +723,7 @@ def save_diagnostics():
 def export_worker(ids, out_dir, compression, scale=1.0, overviews=True, whole=False):
     from .export import export_area, safe_filename
     try:
-        areas = [a for a in load_areas() if a["id"] in ids]
+        areas = [a for a in load_areas() if a["id"] in ids and a.get("role") != "obstacle"]
         if whole:
             areas = [None] + areas
         ortho = S.ortho_path()
@@ -1107,6 +1117,8 @@ class Handler(BaseHTTPRequestHandler):
                     "bounds": [b.left - e0, b.bottom - n0, b.right - e0, b.top - n0], "max_native_zoom": maxz,
                     "cams": [[round(c[0] - e0, 2), round(c[1] - n0, 2)] for c in cams],
                     "mtime": os.path.getmtime(op), "r0": R0}
+        if path == "/api/areas/outlines/settings":
+            return {"last": S.cfg.get("outlines") or {}, "default_dir": os.path.join(S.dir, "exports", "Boundaries")}
         if path == "/api/areas":
             return {"areas": areas_for_client(load_areas())}
         if path == "/api/estimate":
@@ -1273,10 +1285,24 @@ class Handler(BaseHTTPRequestHandler):
             bnds, crs = read_boundaries(p)
             if not bnds:
                 raise ApiError("No polygons found in that file.")
+            role = b.get("role") or "auto"      # "field", "obstacle" or "auto" (the file's own tags)
+            for x in bnds:
+                if role == "obstacle" or (role == "auto" and x.get("role") == "obstacle"):
+                    x["role"] = "obstacle"
+                else:
+                    x.pop("role", None)
             new = to_ortho_crs(bnds, crs, S.origin[0])
+            # obstacles that came without a name of their own get "Obstacle N"
+            k = sum(1 for a in load_areas() if a.get("role") == "obstacle")
+            for a in new:
+                if a.get("role") == "obstacle":
+                    k += 1
+                    if re.match(r"^(Area \d+|.* \(\d+\))$", a.get("name") or "Area 1"):
+                        a["name"] = "Obstacle %d" % k
             areas = load_areas() + new
             save_areas(areas)
-            return {"areas": areas_for_client(areas), "added": len(new)}
+            n_obs = sum(1 for a in new if a.get("role") == "obstacle")
+            return {"areas": areas_for_client(areas), "added": len(new) - n_obs, "obstacles": n_obs}
         if path == "/api/areas/grid":
             from .export import grid_areas
             op = S.ortho_path()
@@ -1287,6 +1313,22 @@ class Handler(BaseHTTPRequestHandler):
             areas = load_areas() + new
             save_areas(areas)
             return {"areas": areas_for_client(areas), "added": len(new)}
+        if path == "/api/areas/outlines":
+            from .export import export_outlines
+            ids = set(b.get("ids") or [])
+            if not ids:
+                raise ApiError("Choose at least one field.")
+            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
+            S.cfg["outlines"] = {k: b.get(k) for k in ("target", "format", "per_field", "obstacles", "spray", "out_dir")}
+            S.save_cfg()
+            try:
+                files = export_outlines(load_areas(), ids, S.origin[0], out_dir, b.get("target") or "generic",
+                                        fmt=b.get("format") or "kml", per_field=bool(b.get("per_field", True)),
+                                        obstacles=bool(b.get("obstacles", True)),
+                                        base=safe_name(S.proj["name"]), spray=b.get("spray"))
+            except ValueError as e:
+                raise ApiError(str(e))
+            return {"files": files, "dir": out_dir}
         if path == "/api/areas/kml":
             from .export import areas_to_kml
             areas = [a for a in load_areas() if not b.get("ids") or a["id"] in b["ids"]]

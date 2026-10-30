@@ -2,7 +2,7 @@
 
 Offline orthomosaics from drone mapping photos, built for the DJI Matrice 4E (RTK). Windows, no install, no internet needed to process.
 
-Import a folder of nadir photos, process them into a georeferenced GeoTIFF orthomosaic, then split it into fields, grid tiles or imported boundaries (KML/KMZ/SHP/GeoJSON) and export one GeoTIFF per area.
+Import a folder of nadir photos, process them into a georeferenced GeoTIFF orthomosaic, then split it into fields, grid tiles or imported boundaries (KML/KMZ/SHP/GeoJSON) and export one GeoTIFF per area. Obstacles (trees, poles, buildings) can be marked inside a field, and field boundaries can be exported for a DJI Pilot 2 mapping mission (M4E, M400), for spray operations on DJI Agras / SmartFarm, XAG and Ceres Applicator View, or as generic KML / GeoJSON / Shapefile.
 
 ## Install
 

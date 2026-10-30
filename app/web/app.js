@@ -780,13 +780,17 @@ const TOOL_HINTS = {
   select: "Drag a box around the photos you want to process.",
   rect: "Drag on the map to draw a rectangle.",
   poly: "Click to place corners; drag to move the map. Click the first corner or double-click to finish. Backspace removes the last corner, Esc cancels.",
+  obst: "Obstacle: click around the tree, pole or building inside a field; click the first corner or double-click to finish. Backspace removes the last corner, Esc cancels.",
 };
+const isPoly = (t) => t === "poly" || t === "obst";
+const OBST = "#D2452F";
 function setTool(t) {
   if (edit && t) finishEdit(true);
   tool = tool === t ? null : t;
   cancelDraft();
   $("toolRect").setAttribute("aria-pressed", tool === "rect");
   $("toolPoly").setAttribute("aria-pressed", tool === "poly");
+  $("toolObst").setAttribute("aria-pressed", tool === "obst");
   $("btnSelectArea").classList.toggle("secondary", tool === "select");
   $("toolHint").textContent = tool && tool !== "select" ? TOOL_HINTS[tool] : "";
   if (tool === "select") toast(TOOL_HINTS.select);
@@ -808,7 +812,7 @@ function onMapDown(e) {
 function onMapMove(e) {
   if (!draw) return;
   if ((tool === "rect" || tool === "select") && draw.start) layers.draft.setBounds(L.latLngBounds(draw.start, e.latlng));
-  if (tool === "poly" && draw.pts && draw.pts.length) layers.draft.setLatLngs([...draw.pts, e.latlng]);
+  if (isPoly(tool) && draw.pts && draw.pts.length) layers.draft.setLatLngs([...draw.pts, e.latlng]);
 }
 async function onMapUp(e) {
   if (!draw || !draw.start) return;
@@ -827,14 +831,14 @@ async function onMapUp(e) {
     return;
   }
   const w = b.getWest(), s = b.getSouth(), en = b.getEast(), n = b.getNorth();
-  addArea({ name: nextName(), kind: "drawn", rings: [[[w, s], [en, s], [en, n], [w, n], [w, s]]] });
+  addArea({ name: nextName("field"), kind: "drawn", rings: [[[w, s], [en, s], [en, n], [w, n], [w, s]]] });
 }
 function onMapClick(e) {
   if (edit && !tool) { if (edit.sel) { edit.sel = null; renderEdit(); } return; }
-  if (tool !== "poly") return;
+  if (!isPoly(tool)) return;
   if (!draw) {
     draw = { pts: [e.latlng] };
-    layers.draft = L.polyline([e.latlng], { color: "#E9B20F", weight: 2, dashArray: "6 4" }).addTo(map);
+    layers.draft = L.polyline([e.latlng], { color: tool === "obst" ? OBST : "#E9B20F", weight: 2, dashArray: "6 4" }).addTo(map);
     return;
   }
   const first = map.latLngToContainerPoint(draw.pts[0]);
@@ -842,7 +846,7 @@ function onMapClick(e) {
   draw.pts.push(e.latlng);
   layers.draft.setLatLngs(draw.pts);
 }
-function onMapDbl() { if (tool === "poly" && draw && draw.pts.length >= 3) finishPoly(); }
+function onMapDbl() { if (isPoly(tool) && draw && draw.pts.length >= 3) finishPoly(); }
 function finishPoly() {
   let pts = draw.pts;
   if (pts.length > 3) {
@@ -852,7 +856,8 @@ function finishPoly() {
   const ring = pts.map((p) => [p.lng, p.lat]);
   ring.push(ring[0]);
   cancelDraft();
-  addArea({ name: nextName(), kind: "drawn", rings: [ring] });
+  if (tool === "obst") addArea({ name: nextName("obstacle"), kind: "drawn", role: "obstacle", rings: [ring] });
+  else addArea({ name: nextName("field"), kind: "drawn", rings: [ring] });
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea")) return;
@@ -863,7 +868,7 @@ document.addEventListener("keydown", (e) => {
     if ((e.key === "Delete" || e.key === "Backspace") && edit.sel) { removeCorner(edit.sel[0], edit.sel[1]); e.preventDefault(); return; }
   }
   if (e.key === "Escape") { if (draw) cancelDraft(); else if (tool) setTool(null); else if (!$("dash").hidden && status.project) $("dash").hidden = true; }
-  if (e.key === "Backspace" && tool === "poly" && draw && draw.pts.length > 1) {
+  if (e.key === "Backspace" && isPoly(tool) && draw && draw.pts.length > 1) {
     draw.pts.pop();
     layers.draft.setLatLngs(draw.pts);
     e.preventDefault();
@@ -931,8 +936,9 @@ function removeCorner(ri, k) {
 function editShape() {
   const a = areas.find((x) => x.id === edit.id);
   if (a && a._layer) a._layer.setLatLngs(edit.rings.map((r) => r.map((p) => [p[1], p[0]])));
-  const ha = editAreaHa(), ac = ha * 2.47105;
-  $("editSize").textContent = fmt(ac, ac < 10 ? 2 : 1) + " ac (" + fmt(ha, 2) + " ha)";
+  const ha = editAreaHa();
+  $("editSize").textContent = a && a.role === "obstacle" ? sizeText({ ha, ac: ha * 2.47105, role: "obstacle" }) :
+    fmt(ha * 2.47105, ha * 2.47105 < 10 ? 2 : 1) + " ac (" + fmt(ha, 2) + " ha)";
 }
 function renderEdit() {
   if (!edit) return;
@@ -980,17 +986,25 @@ async function finishEdit(save) {
 function cancelEdit() { finishEdit(false); }
 
 // ------------------------------------------------------------------ areas
-function nextName() {
-  let k = areas.length + 1;
+function nextName(role) {
+  const word = role === "obstacle" ? "Obstacle " : "Area ";
+  let k = areas.filter((a) => (a.role === "obstacle") === (role === "obstacle")).length + 1;
   const names = new Set(areas.map((a) => a.name));
-  while (names.has("Area " + k)) k++;
-  return "Area " + k;
+  while (names.has(word + k)) k++;
+  return word + k;
+}
+const isObst = (a) => a.role === "obstacle";
+const fields = () => areas.filter((a) => !isObst(a));
+// Obstacles are small: square feet up to a quarter acre, acres above that.
+function sizeText(a) {
+  if (a.role === "obstacle" && a.ac < 0.25) return fmt(a.ha * 107639.104, 0) + " ft²";
+  return fmt(a.ac, a.ac < 10 ? 2 : 1) + " ac";
 }
 async function loadAreas() {
   try { areas = (await api("/api/areas")).areas; } catch (e) { areas = []; }
   drawAreas();
 }
-const plain = () => areas.map((a) => ({ id: a.id, name: a.name, kind: a.kind, rings: a.rings }));
+const plain = () => areas.map((a) => ({ id: a.id, name: a.name, kind: a.kind, role: a.role, rings: a.rings }));
 async function saveAreas() {
   try { areas = (await api("/api/areas", { areas: plain() })).areas; drawAreas(); }
   catch (e) { toast(e.message); }
@@ -1000,15 +1014,21 @@ async function addArea(a) {
   areas.push(a);
   try { areas = (await api("/api/areas", { areas: plain() })).areas; } catch (e) { toast(e.message); }
   drawAreas();
-  if (areas.length) focusArea(areas[areas.length - 1].id, true);
+  const last = areas[areas.length - 1];
+  if (last) {
+    focusArea(last.id, !isObst(last));
+    if (isObst(last) && !last.parent) toast(last.name + " is not inside a field, so it won't be exported with one. Draw obstacles inside a field outline.", 7000);
+  }
 }
 function drawAreas() {
   if (!layers.areas) return;
   layers.areas.clearLayers();
-  for (const a of areas) {
+  for (const a of [...fields(), ...areas.filter(isObst)]) {     // obstacles on top so they can be clicked
     const ll = a.rings.map((r) => r.map((p) => [p[1], p[0]]));
-    const poly = L.polygon(ll, { color: "#E9B20F", weight: 2.5, fillColor: "#E9B20F", fillOpacity: 0.08 });
-    poly.bindTooltip(a.name, { permanent: true, direction: "center", className: "area-label" });
+    const ob = isObst(a);
+    const poly = L.polygon(ll, ob ? { color: OBST, weight: 2, fillColor: OBST, fillOpacity: 0.25 }
+                                  : { color: "#E9B20F", weight: 2.5, fillColor: "#E9B20F", fillOpacity: 0.08 });
+    poly.bindTooltip(a.name, { permanent: !ob, direction: "center", className: "area-label" + (ob ? " obst" : "") });
     poly.on("click", (e) => { if (!tool) { L.DomEvent.stop(e); setPanel("areas"); focusArea(a.id); } });
     poly.on("dblclick", (e) => { if (!tool) { L.DomEvent.stop(e); setPanel("areas"); startEdit(a.id); } });
     poly.addTo(layers.areas);
@@ -1017,49 +1037,71 @@ function drawAreas() {
   renderAreaList();
   if (edit) renderEdit();
 }
-function renderAreaList() {
-  const ul = $("areaList");
-  ul.innerHTML = "";
-  for (const a of areas) {
-    const li = document.createElement("li");
-    li.dataset.id = a.id;
-    const nm = document.createElement("input");
-    nm.type = "text";
-    nm.value = a.name;
-    nm.setAttribute("aria-label", "Area name");
-    nm.onchange = () => { a.name = nm.value.trim() || a.name; saveAreas(); };
-    nm.onfocus = () => focusArea(a.id, false, true);
-    const sz = document.createElement("span");
-    sz.className = "size";
-    sz.textContent = fmt(a.ac, a.ac < 10 ? 2 : 1) + " ac";
-    sz.title = fmt(a.ha, 2) + " ha";
-    const del = document.createElement("button");
-    del.className = "del";
-    del.textContent = "×";
-    del.title = "Remove area";
-    del.setAttribute("aria-label", "Remove " + a.name);
-    del.onclick = () => { if (edit && edit.id === a.id) cancelEdit(); areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
-    const ed = document.createElement("button");
-    ed.className = "edit";
-    ed.innerHTML = '<svg aria-hidden="true"><use href="#i-pencil"/></svg>';
-    ed.title = "Edit outline";
-    ed.setAttribute("aria-label", "Edit the outline of " + a.name);
-    ed.setAttribute("aria-pressed", !!(edit && edit.id === a.id));
-    ed.onclick = () => (edit && edit.id === a.id ? finishEdit(true) : startEdit(a.id));
-    const send = document.createElement("button");
+function areaRow(a) {
+  const ob = isObst(a);
+  const li = document.createElement("li");
+  li.dataset.id = a.id;
+  if (ob) li.className = "obs";
+  const nm = document.createElement("input");
+  nm.type = "text";
+  nm.value = a.name;
+  nm.setAttribute("aria-label", ob ? "Obstacle name" : "Area name");
+  nm.onchange = () => { a.name = nm.value.trim() || a.name; saveAreas(); };
+  nm.onfocus = () => focusArea(a.id, false, true);
+  const sz = document.createElement("span");
+  sz.className = "size";
+  sz.textContent = sizeText(a);
+  sz.title = fmt(a.ha, 3) + " ha" + (!ob && a.obstacles ? " · " + a.obstacles + (a.obstacles === 1 ? " obstacle" : " obstacles") : "");
+  const del = document.createElement("button");
+  del.className = "del";
+  del.textContent = "×";
+  del.title = ob ? "Remove obstacle" : "Remove area";
+  del.setAttribute("aria-label", "Remove " + a.name);
+  del.onclick = () => { if (edit && edit.id === a.id) cancelEdit(); areas = areas.filter((x) => x.id !== a.id); saveAreas(); };
+  const ed = document.createElement("button");
+  ed.className = "edit";
+  ed.innerHTML = '<svg aria-hidden="true"><use href="#i-pencil"/></svg>';
+  ed.title = "Edit outline";
+  ed.setAttribute("aria-label", "Edit the outline of " + a.name);
+  ed.setAttribute("aria-pressed", !!(edit && edit.id === a.id));
+  ed.onclick = () => (edit && edit.id === a.id ? finishEdit(true) : startEdit(a.id));
+  let send = document.createElement("span");
+  if (!ob) {
+    send = document.createElement("button");
     const sentAt = a.pilot2 && a.pilot2.sent && a.pilot2.sent.at;
     send.className = "send" + (sentAt ? " sent" : "");
     send.innerHTML = '<svg aria-hidden="true"><use href="#i-send"/></svg>';
     send.title = sentAt ? "Send to Pilot 2 (last sent " + sentAt + ")" : "Send to Pilot 2";
     send.setAttribute("aria-label", "Send " + a.name + " to Pilot 2");
     send.onclick = () => openPilot2(a.id);
-    li.append(nm, sz, ed, send, del);
-    ul.append(li);
   }
+  li.append(nm, sz, ed, send, del);
+  return li;
+}
+function renderAreaList() {
+  const ul = $("areaList");
+  ul.innerHTML = "";
+  const obs = areas.filter(isObst);
+  for (const a of fields()) {
+    ul.append(areaRow(a));
+    for (const o of obs) if (o.parent === a.id) ul.append(areaRow(o));
+  }
+  const orphans = obs.filter((o) => !o.parent || !areas.some((a) => a.id === o.parent));
+  if (orphans.length) {
+    const h = document.createElement("li");
+    h.className = "orphan-head";
+    h.textContent = "Obstacles outside any field";
+    ul.append(h);
+    for (const o of orphans) ul.append(areaRow(o));
+  }
+  const f = fields();
   $("areaHead").hidden = !areas.length;
   $("areaActions").hidden = !areas.length;
-  const tot = areas.reduce((s, a) => s + a.ac, 0);
-  $("areaCount").textContent = areas.length + (areas.length === 1 ? " area · " : " areas · ") + fmt(tot, tot < 10 ? 1 : 0) + " ac";
+  $("btnExportAreas").disabled = !f.length;
+  $("btnOutlines").disabled = !f.length;
+  const tot = f.reduce((s, a) => s + a.ac, 0);
+  $("areaCount").textContent = f.length + (f.length === 1 ? " area · " : " areas · ") + fmt(tot, tot < 10 ? 1 : 0) + " ac" +
+    (obs.length ? " · " + obs.length + (obs.length === 1 ? " obstacle" : " obstacles") : "");
 }
 function focusArea(id, zoom, noScroll) {
   document.querySelectorAll("#areaList li").forEach((li) => li.classList.toggle("focus", li.dataset.id === id));
@@ -1185,17 +1227,116 @@ async function p2Go(upload) {
   }
 }
 
+// ------------------------------------------------------------------ export boundaries
+// Mapping missions (DJI Pilot 2) take the field outline only. Spray operations take the field and
+// the obstacles inside it; DJI Agras also takes the rate, height and spray width.
+const BND_HOW = {
+  dji_mapping: "One KML per field. Copy it to the remote controller and import it in Pilot 2 to plan a mapping mission there. " +
+    "To send a ready-made mission with height and overlap instead, use the send button next to the field.",
+  dji_agras: "Writes a DJI\\ShapeFile folder. Copy the DJI folder to the root of the remote controller's microSD card or a USB drive, " +
+    "then import the field in the Agras app. Each field is one shape with the obstacles cut out.",
+  xag: "Writes a folder with a KML and a GeoJSON for each field. Import the KML in XAG's field manager (Field Import) or the XAG One app.",
+  ceres: "One KML per field, boundary only. In Applicator View: Manage Fields → Import Fields.",
+  generic: "Boundaries and obstacles as separate shapes tagged BOUNDARY and OBSTACLE, as Pix4Dfields writes them.",
+};
+const BND_OBS = { dji_mapping: false, ceres: false };
+const bnd = { dir: "" };
+const bndTarget = () => document.querySelector("input[name=bndtarget]:checked").value;
+async function openOutlines() {
+  setErr("bndErr", "");
+  $("bndOk").hidden = true;
+  $("bndOpen").hidden = true;
+  let st = { last: {}, default_dir: "" };
+  try { st = await api("/api/areas/outlines/settings"); } catch (e) { /* defaults */ }
+  const last = st.last || {};
+  const t = last.target && document.querySelector('input[name=bndtarget][value="' + last.target + '"]');
+  if (t) t.checked = true;
+  const f = last.format && document.querySelector('input[name=bndfmt][value="' + last.format + '"]');
+  if (f) f.checked = true;
+  if (last.per_field != null) $("bndPerField").checked = !!last.per_field;
+  if (last.obstacles != null) $("bndObs").checked = !!last.obstacles;
+  const sp = last.spray || {};
+  if (sp.rate_gal_ac != null) $("bndRate").value = sp.rate_gal_ac;
+  if (sp.height_ft != null) $("bndHeight").value = sp.height_ft;
+  if (sp.width_ft != null) $("bndWidth").value = sp.width_ft;
+  $("bndDir").value = last.out_dir || st.default_dir || "";
+  const ul = $("bndList");
+  ul.innerHTML = "";
+  const focus = document.querySelector("#areaList li.focus");
+  const focusId = focus && focus.dataset.id;
+  for (const a of fields()) {
+    const li = document.createElement("li");
+    li.innerHTML = '<label class="check"><input type="checkbox"> <span></span><span class="obsn"></span><span class="size"></span></label>';
+    const c = li.querySelector("input");
+    c.dataset.id = a.id;
+    c.checked = true;
+    c.onchange = syncOutlines;
+    li.querySelector("span").textContent = a.name;
+    li.querySelector(".obsn").textContent = a.obstacles ? a.obstacles + (a.obstacles === 1 ? " obstacle" : " obstacles") : "";
+    li.querySelector(".size").textContent = sizeText(a);
+    ul.append(li);
+  }
+  // one field picked in the list: start with just that one
+  if (focusId && fields().some((a) => a.id === focusId))
+    ul.querySelectorAll("input").forEach((c) => (c.checked = c.dataset.id === focusId));
+  syncOutlines();
+  $("bndDlg").showModal();
+}
+function syncOutlines() {
+  const t = bndTarget();
+  $("bndHow").textContent = BND_HOW[t];
+  $("bndGeneric").hidden = t !== "generic";
+  $("bndSpray").hidden = t !== "dji_agras";
+  const obsOk = BND_OBS[t] !== false;
+  $("bndObs").disabled = !obsOk;
+  $("bndObsNote").textContent = obsOk ? "" : t === "dji_mapping" ? "(not used for mapping missions)" : "(Applicator View takes the boundary only)";
+  const boxes = [...document.querySelectorAll("#bndList input")];
+  const n = boxes.filter((c) => c.checked).length;
+  $("bndAll").checked = n === boxes.length && n > 0;
+  $("bndAll").indeterminate = n > 0 && n < boxes.length;
+  $("bndAllLabel").textContent = "All (" + n + " of " + boxes.length + " selected)";
+  const nObs = fields().filter((a) => boxes.some((c) => c.checked && c.dataset.id === a.id)).reduce((s, a) => s + (a.obstacles || 0), 0);
+  $("bndObsRow").hidden = !nObs;
+  $("bndGo").disabled = !n;
+}
+async function runOutlines() {
+  setErr("bndErr", "");
+  $("bndOk").hidden = true;
+  const t = bndTarget();
+  const body = {
+    target: t,
+    ids: [...document.querySelectorAll("#bndList input:checked")].map((c) => c.dataset.id),
+    format: document.querySelector("input[name=bndfmt]:checked").value,
+    per_field: $("bndPerField").checked,
+    obstacles: $("bndObs").checked && BND_OBS[t] !== false,
+    out_dir: $("bndDir").value.trim(),
+  };
+  body.spray = { rate_gal_ac: +$("bndRate").value, height_ft: +$("bndHeight").value, width_ft: +$("bndWidth").value };
+  if (t === "dji_agras" && (!(body.spray.width_ft > 0) || !(body.spray.height_ft > 0)))
+    return setErr("bndErr", "Enter the spray height and spray width.");
+  const btn = $("bndGo");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/areas/outlines", body);
+    bnd.dir = r.dir;
+    $("bndOk").textContent = "Saved " + r.files.length + (r.files.length === 1 ? " file" : " files") + " in " + r.dir + ".";
+    $("bndOk").hidden = false;
+    $("bndOpen").hidden = false;
+  } catch (e) { setErr("bndErr", e.message); }
+  finally { btn.disabled = false; }
+}
+
 // ------------------------------------------------------------------ export
 function openExport(areasFirst) {
   if (!result) return;
   setErr("exportErr", "");
-  const has = areas.length > 0;
+  const has = fields().length > 0;
   $("expWhole").checked = !has || !areasFirst;
   $("expAreasWrap").hidden = !has;
   $("expNoAreas").hidden = has;
   const ul = $("expAreaList");
   ul.innerHTML = "";
-  for (const a of areas) {
+  for (const a of fields()) {
     const li = document.createElement("li");
     li.innerHTML = '<label class="check"><input type="checkbox" checked> <span></span><span class="size"></span></label>';
     li.querySelector("input").dataset.id = a.id;
@@ -1428,14 +1569,29 @@ function wire() {
   $("lyrAreas").onchange = () => { $("lyrAreas").checked ? layers.areas.addTo(map) : layers.areas.remove(); };
 
   // areas
-  $("toolRect").onclick = () => { $("gridForm").hidden = true; $("toolGrid").setAttribute("aria-pressed", false); setTool("rect"); };
-  $("toolPoly").onclick = () => { $("gridForm").hidden = true; $("toolGrid").setAttribute("aria-pressed", false); setTool("poly"); };
-  $("toolGrid").onclick = () => {
-    if (tool) setTool(null);
-    const show = $("gridForm").hidden;
-    $("gridForm").hidden = !show;
-    $("toolGrid").setAttribute("aria-pressed", show);
+  const closeForms = (keep) => {
+    for (const [f, b] of [["gridForm", "toolGrid"], ["importForm", "toolImport"]]) {
+      if (f === keep) continue;
+      $(f).hidden = true;
+      $(b).setAttribute("aria-pressed", false);
+    }
   };
+  $("toolRect").onclick = () => { closeForms(); setTool("rect"); };
+  $("toolPoly").onclick = () => { closeForms(); setTool("poly"); };
+  $("toolObst").onclick = () => {
+    closeForms();
+    if (!fields().length && tool !== "obst") toast("Draw or import the field first, then mark the obstacles inside it.", 6000);
+    setTool("obst");
+  };
+  const toggleForm = (f, b) => {
+    if (tool) setTool(null);
+    closeForms(f);
+    const show = $(f).hidden;
+    $(f).hidden = !show;
+    $(b).setAttribute("aria-pressed", show);
+  };
+  $("toolGrid").onclick = () => toggleForm("gridForm", "toolGrid");
+  $("toolImport").onclick = () => toggleForm("importForm", "toolImport");
   document.querySelectorAll("input[name=gridmode]").forEach((r) => (r.onchange = () => {
     const sz = document.querySelector("input[name=gridmode]:checked").value === "size";
     document.querySelector(".gridsize").hidden = !sz;
@@ -1455,22 +1611,31 @@ function wire() {
       $("toolGrid").setAttribute("aria-pressed", false);
     } catch (err) { toast(err.message); }
   };
-  $("toolImport").onclick = async () => {
-    const p = await browse("file", "Choose field boundaries (KML, KMZ, SHP, GeoJSON)", "");
+  $("importPick").onclick = async () => {
+    const role = document.querySelector("input[name=importrole]:checked").value;
+    const p = await browse("file", role === "obstacle" ? "Choose obstacles (KML, KMZ, SHP, GeoJSON)" :
+                                   "Choose field boundaries (KML, KMZ, SHP, GeoJSON)", "");
     if (!p) return;
     try {
-      const r = await api("/api/areas/import", { path: p });
+      const r = await api("/api/areas/import", { path: p, role });
       areas = r.areas;
       drawAreas();
-      toast("Imported " + r.added + (r.added === 1 ? " boundary." : " boundaries."));
+      const parts = [];
+      if (r.added) parts.push(r.added + (r.added === 1 ? " boundary" : " boundaries"));
+      if (r.obstacles) parts.push(r.obstacles + (r.obstacles === 1 ? " obstacle" : " obstacles"));
+      toast("Imported " + parts.join(" and ") + ".");
+      $("importForm").hidden = true;
+      $("toolImport").setAttribute("aria-pressed", false);
     } catch (e) { toast(e.message, 6000); }
   };
   $("areaClear").onclick = () => { if (confirm("Remove all areas?")) { if (edit) endEdit(); areas = []; saveAreas(); } };
   $("btnExportAreas").onclick = () => openExport(true);
-  $("btnKml").onclick = async () => {
-    try { const r = await api("/api/areas/kml", { out_dir: $("exportDir").value.trim() }); toast("Saved " + r.path, 6000); }
-    catch (e) { toast(e.message); }
-  };
+  $("btnOutlines").onclick = openOutlines;
+  document.querySelectorAll("input[name=bndtarget]").forEach((r) => (r.onchange = syncOutlines));
+  $("bndAll").onchange = () => { document.querySelectorAll("#bndList input").forEach((c) => (c.checked = $("bndAll").checked)); syncOutlines(); };
+  $("bndBrowse").onclick = async () => { const p = await browse("folder", "Save boundary files in", $("bndDir").value); if (p) $("bndDir").value = p; };
+  $("bndOpen").onclick = () => api("/api/open_path", { path: bnd.dir });
+  $("bndForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); runOutlines(); } };
 
   // export dialog
   $("expWhole").onchange = requestExportEstimate;

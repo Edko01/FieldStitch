@@ -22,6 +22,7 @@
   --crop: #3E6B51;
   --crop-soft: #DCE8DF;
   --error: #B5432F;
+  --obst: #D2452F;
   --radius-s: 4px;
   --radius-m: 8px;
   --top: 48px;
@@ -248,8 +249,9 @@ details.more summary { cursor: pointer; color: var(--crop); font-weight: 600; pa
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; border: 1.5px solid #fff; box-shadow: 0 0 0 1px #9AA59E; }
 
 /* ---------- areas ---------- */
-.toolgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.tool { display: grid; justify-items: center; gap: 4px; padding: 8px 2px; background: #fff; border: 1px solid var(--line); font-size: 12px; font-weight: 550; }
+.toolgrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.tool { display: grid; justify-items: center; gap: 4px; padding: 8px 1px; background: #fff; border: 1px solid var(--line); font-size: 11.5px; font-weight: 550; min-width: 0; }
+.tool.obst svg { stroke: var(--obst); }
 .tool svg { width: 20px; height: 20px; fill: none; stroke: var(--ink); stroke-width: 1.6; stroke-linejoin: round; }
 .tool:hover { border-color: #AEB9B1; }
 .tool[aria-pressed=true] { background: var(--pine); color: #fff; border-color: var(--pine); }
@@ -269,6 +271,11 @@ details.more summary { cursor: pointer; color: var(--crop); font-weight: 600; pa
 .arealist .edit svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
 .arealist .edit:hover, .arealist .edit:focus-visible, .arealist .edit[aria-pressed=true] { color: var(--ink); background: var(--line-2); }
 .arealist li.focus { background: #FBF1CF; }
+.arealist li.obs { padding-left: 18px; position: relative; }
+.arealist li.obs::before { content: ""; position: absolute; left: 6px; top: 50%; width: 7px; height: 7px; margin-top: -4px; border-radius: 2px; background: var(--obst); }
+.arealist li.obs input[type=text] { font-size: 13px; color: var(--ink-2); }
+.arealist li.orphan-head { display: block; padding: 10px 2px 2px; font-size: 12px; color: var(--ink-3); border-bottom: 0; }
+.area-label.obst { background: var(--obst); color: #fff; font-size: 11px; font-weight: 600; }
 .arealist input[type=text] { height: 28px; border-color: transparent; background: transparent; padding: 0 6px; width: 100%; }
 .arealist input[type=text]:hover, .arealist input[type=text]:focus { border-color: var(--line); background: #fff; }
 .arealist .size { font-size: 12px; color: var(--ink-2); white-space: nowrap; }
@@ -494,3 +501,21 @@ dialog.modal .bar { margin: 4px 0 12px; }
 .vtx.mid { width: 9px !important; height: 9px !important; margin: -4.5px 0 0 -4.5px !important; border-radius: 50%; border-width: 1.5px; opacity: .75; cursor: copy; }
 .vtx.mid:hover { opacity: 1; }
 .cursor-cross.leaflet-dragging, .cursor-cross.leaflet-dragging .leaflet-interactive { cursor: grabbing !important; }
+
+/* ---------- export boundaries ---------- */
+.bndgroups { display: grid; grid-template-columns: 1fr 1.6fr 1fr; gap: 12px; }
+.bndtargets { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 6px; align-content: start; }
+.bndtargets legend { font-size: 12px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); padding: 0; margin-bottom: 6px; }
+.bndtargets label { margin: 0; }
+.bndtargets input { position: absolute; opacity: 0; pointer-events: none; }
+.bndtargets span { display: grid; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-s); background: #fff; cursor: pointer; }
+.bndtargets b { font-size: 13.5px; font-weight: 650; }
+.bndtargets small { color: var(--ink-2); font-size: 12px; line-height: 1.35; }
+.bndtargets span:hover { border-color: #9DAEA3; }
+.bndtargets input:checked + span { border-color: var(--crop); background: #F1F7F2; box-shadow: inset 0 0 0 1px var(--crop); }
+.bndtargets input:focus-visible + span { outline: 2px solid var(--stake); outline-offset: 1px; }
+.bndhow { margin: 12px 0 4px; padding: 9px 12px; background: var(--sage); border-radius: var(--radius-s); font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+#bndDlg .explist { margin-left: 24px; }
+#bndDlg .explist .obsn { color: var(--obst); font-size: 12px; margin-left: 8px; }
+#bndSpray { margin-top: 10px; }
+@media (max-width: 700px) { .bndgroups { grid-template-columns: 1fr; } }

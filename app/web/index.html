@@ -129,12 +129,13 @@
       <header class="panehead"><h2>Areas</h2><button class="iconbtn sm" data-closepane aria-label="Close panel"><svg><use href="#i-close"/></svg></button></header>
       <p class="hint" id="areasLocked">Areas become available once there is an orthomosaic.</p>
       <div id="areasTools" hidden>
-        <p class="hint">Split the orthomosaic into fields or tiles, then export each one as its own GeoTIFF.</p>
+        <p class="hint">Split the orthomosaic into fields or tiles and export each one as its own GeoTIFF. Mark obstacles (trees, poles, buildings) inside a field for spray drones.</p>
         <div class="toolgrid">
           <button class="tool" id="toolRect" aria-pressed="false"><svg viewBox="0 0 20 20"><rect x="3" y="4" width="14" height="12"/></svg>Rectangle</button>
           <button class="tool" id="toolPoly" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M3 15 6 4l9 2 2 9z"/></svg>Polygon</button>
+          <button class="tool obst" id="toolObst" aria-pressed="false" title="Draw an obstacle inside a field"><svg viewBox="0 0 20 20"><path d="M5 14 7 6l7 1 1 7z"/><path d="M8 8l5 5M13 8l-5 5"/></svg>Obstacle</button>
           <button class="tool" id="toolGrid" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M3 3h14v14H3zM10 3v14M3 10h14"/></svg>Grid</button>
-          <button class="tool" id="toolImport"><svg viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M3 17h14"/></svg>Import</button>
+          <button class="tool" id="toolImport" aria-pressed="false"><svg viewBox="0 0 20 20"><path d="M10 3v10M6 9l4 4 4-4M3 17h14"/></svg>Import</button>
         </div>
         <p class="hint" id="toolHint"></p>
         <div class="editbar" id="editBar" hidden>
@@ -156,14 +157,24 @@
           <div class="gridcount" hidden><input id="gridRows" type="number" min="1" value="2" aria-label="Rows"> × <input id="gridCols" type="number" min="1" value="2" aria-label="Columns"></div>
           <button class="secondary" type="submit">Add grid areas</button>
         </form>
+        <div class="gridform" id="importForm" hidden>
+          <fieldset class="seg">
+            <legend>Import shapes as</legend>
+            <label><input type="radio" name="importrole" value="auto" checked><span>As tagged</span></label>
+            <label><input type="radio" name="importrole" value="field"><span>Fields</span></label>
+            <label><input type="radio" name="importrole" value="obstacle"><span>Obstacles</span></label>
+          </fieldset>
+          <p class="hint small">“As tagged” reads the obstacle tags written by Pix4Dfields, DJI and XAG; untagged shapes become fields.</p>
+          <button class="secondary" type="button" id="importPick">Choose file…</button>
+        </div>
         <div class="arealist-head" id="areaHead" hidden>
           <span id="areaCount"></span>
           <button class="linkish small" id="areaClear">Remove all</button>
         </div>
         <ul class="arealist" id="areaList"></ul>
         <div class="btnrow" id="areaActions" hidden>
-          <button class="primary" id="btnExportAreas">Export areas…</button>
-          <button class="ghost" id="btnKml">Save outlines as KML</button>
+          <button class="primary" id="btnExportAreas">Export GeoTIFFs…</button>
+          <button class="ghost" id="btnOutlines">Export boundaries…</button>
         </div>
       </div>
     </section>
@@ -327,6 +338,60 @@
     <div class="btnrow end">
       <button class="ghost" value="cancel">Cancel</button>
       <button class="primary" id="btnExport" value="export">Export</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===== export boundaries ===== -->
+<dialog class="modal wide" id="bndDlg" aria-labelledby="bndTitle">
+  <form method="dialog" id="bndForm">
+    <header class="modalhead"><h2 id="bndTitle">Export boundaries</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <div class="bndgroups">
+      <fieldset class="bndtargets">
+        <legend>Mapping mission</legend>
+        <label><input type="radio" name="bndtarget" value="dji_mapping"><span><b>DJI Pilot 2</b><small>M4E, M400 and other DJI camera drones. Field boundary only.</small></span></label>
+      </fieldset>
+      <fieldset class="bndtargets">
+        <legend>Spray operation</legend>
+        <label><input type="radio" name="bndtarget" value="dji_agras"><span><b>DJI Agras / SmartFarm</b><small>Shapefile with obstacles cut out, rate, height and spray width.</small></span></label>
+        <label><input type="radio" name="bndtarget" value="xag"><span><b>XAG</b><small>KML and GeoJSON with boundary and obstacles.</small></span></label>
+        <label><input type="radio" name="bndtarget" value="ceres"><span><b>Ceres Applicator View</b><small>KML, field boundary only.</small></span></label>
+      </fieldset>
+      <fieldset class="bndtargets">
+        <legend>Other software</legend>
+        <label><input type="radio" name="bndtarget" value="generic" checked><span><b>Generic</b><small>KML, GeoJSON or Shapefile with boundaries and obstacles tagged.</small></span></label>
+      </fieldset>
+    </div>
+    <p class="bndhow" id="bndHow"></p>
+    <fieldset class="plain">
+      <legend>Fields</legend>
+      <label class="check"><input type="checkbox" id="bndAll"> <span id="bndAllLabel">All fields</span></label>
+      <ul class="explist" id="bndList"></ul>
+    </fieldset>
+    <div id="bndGeneric">
+      <fieldset class="seg">
+        <legend>File type</legend>
+        <label><input type="radio" name="bndfmt" value="kml" checked><span>KML</span></label>
+        <label><input type="radio" name="bndfmt" value="geojson"><span>GeoJSON</span></label>
+        <label><input type="radio" name="bndfmt" value="shp"><span>Shapefile</span></label>
+      </fieldset>
+      <label class="check"><input type="checkbox" id="bndPerField" checked> One file per field</label>
+    </div>
+    <label class="check" id="bndObsRow"><input type="checkbox" id="bndObs" checked> Include obstacles <small class="muted" id="bndObsNote"></small></label>
+    <div class="p2grid" id="bndSpray">
+      <label>Rate (gal/ac)<input type="number" id="bndRate" step="0.1" min="0" max="50" value="3"></label>
+      <label>Spray height (ft)<input type="number" id="bndHeight" step="1" min="3" max="100" value="15"></label>
+      <label>Spray width (ft)<input type="number" id="bndWidth" step="0.5" min="3" max="80" value="18"></label>
+    </div>
+    <label>Save to
+      <span class="pathrow"><input id="bndDir"><button type="button" class="ghost" id="bndBrowse">Browse…</button></span>
+    </label>
+    <p class="form-error" id="bndErr" role="alert"></p>
+    <p class="p2ok" id="bndOk" role="status" hidden></p>
+    <div class="btnrow end">
+      <button class="ghost" value="cancel">Close</button>
+      <button class="ghost" type="button" id="bndOpen" hidden>Open folder</button>
+      <button class="primary" id="bndGo" value="export">Export</button>
     </div>
   </form>
 </dialog>

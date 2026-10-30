@@ -38,6 +38,17 @@ def _strip_ns(root):
     return root
 
 
+_OBSTACLE_WORDS = ("obstacle", "exclusion", "no-spray", "nospray", "no spray", "no_spray", "hazard")
+
+
+def _role_of(values):
+    """'obstacle' when a feature's type attribute says so (Pix4Dfields writes visualType=OBSTACLE)."""
+    for v in values:
+        if v and any(w in str(v).strip().lower() for w in _OBSTACLE_WORDS):
+            return "obstacle"
+    return None
+
+
 def read_kml_bytes(data):
     root = _strip_ns(ET.fromstring(data))
     out = []
@@ -45,6 +56,11 @@ def read_kml_bytes(data):
     for pm in root.iter("Placemark"):
         name_el = pm.find("name")
         name = (name_el.text or "").strip() if name_el is not None and name_el.text else ""
+        typ = [sd.text for sd in pm.iter("SimpleData")
+               if (sd.get("name") or "").lower() in ("visualtype", "type", "kind", "role", "class")]
+        typ += [d.findtext("value") for d in pm.iter("Data")
+                if (d.get("name") or "").lower() in ("visualtype", "type", "kind", "role", "class")]
+        role = _role_of(typ)
         polys = list(pm.iter("Polygon"))
         for k, poly in enumerate(polys):
             outer = poly.find("outerBoundaryIs/LinearRing/coordinates")
@@ -58,7 +74,7 @@ def read_kml_bytes(data):
             nm = name or "Area %d" % count
             if len(polys) > 1:
                 nm = "%s (%d)" % (nm, k + 1)
-            out.append({"name": nm, "rings": rings})
+            out.append({"name": nm, "rings": rings, "role": role})
     return out, "EPSG:4326"
 
 
@@ -102,11 +118,14 @@ def read_boundaries(path):
                 if f[1] == "C":
                     name_field = f[0]
                     break
+        type_fields = [f for f in fields if f.lower() in ("visualtype", "type", "kind", "role", "class")]
         feats = []
         for sr in r.iterShapeRecords():
             props = {}
             if name_field:
                 props["name"] = str(sr.record[name_field])
+            for f in type_fields:
+                props.setdefault("visualType", str(sr.record[f]))
             feats.append({"geometry": sr.shape.__geo_interface__, "properties": props})
         prj = os.path.splitext(path)[0] + ".prj"
         crs = None
@@ -134,6 +153,7 @@ def _from_geo_features(feats):
             if props.get(k):
                 name = str(props[k])
                 break
+        role = _role_of([v for k, v in props.items() if k.lower() in ("visualtype", "type", "kind", "role", "class")])
         t = geom.get("type")
         polys = []
         if t == "Polygon":
@@ -146,7 +166,7 @@ def _from_geo_features(feats):
             nm = name or "Area %d" % count
             if len(polys) > 1:
                 nm = "%s (%d)" % (nm, k + 1)
-            out.append({"name": nm, "rings": rings})
+            out.append({"name": nm, "rings": rings, "role": role})
     return out
 
 
@@ -166,7 +186,10 @@ def to_ortho_crs(boundaries, src_crs, dst_epsg):
             xs, ys = tr.transform([p[0] for p in ring], [p[1] for p in ring])
             rings.append([[float(x), float(y)] for x, y in zip(xs, ys)])
         if rings:
-            areas.append({"id": new_id(), "name": b["name"], "kind": "imported", "rings": rings})
+            a = {"id": new_id(), "name": b["name"], "kind": "imported", "rings": rings}
+            if b.get("role") == "obstacle":
+                a["role"] = "obstacle"
+            areas.append(a)
     return areas
 
 
@@ -615,7 +638,7 @@ def area_stats(area):
         return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
     rings = area["rings"]
     a = ring_area(rings[0]) - sum(ring_area(r) for r in rings[1:])
-    return {"ha": round(a / 1e4, 3), "ac": round(a / 4046.8564224, 3)}
+    return {"ha": round(a / 1e4, 6), "ac": round(a / 4046.8564224, 6)}
 
 
 def areas_to_kml(areas, epsg):
@@ -637,3 +660,247 @@ def areas_to_kml(areas, epsg):
 
 def _xml_escape(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ----------------------------------------------------------------------- fields and obstacles
+def _inside(pt, ring):
+    """Ray casting: is pt inside the closed ring (list of [x, y])?"""
+    x, y = pt
+    inside = False
+    n = len(ring)
+    for i in range(n - 1):
+        x1, y1 = ring[i][0], ring[i][1]
+        x2, y2 = ring[i + 1][0], ring[i + 1][1]
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _in_area(pt, area):
+    rings = area["rings"]
+    return _inside(pt, rings[0]) and not any(_inside(pt, r) for r in rings[1:])
+
+
+def obstacle_parents(areas):
+    """{obstacle id: id of the field it lies in (its corners mostly inside), or None}."""
+    fields = [a for a in areas if a.get("role") != "obstacle"]
+    out = {}
+    for o in areas:
+        if o.get("role") != "obstacle":
+            continue
+        pts = o["rings"][0][:-1] or o["rings"][0]
+        best, score = None, 0
+        for f in fields:
+            k = sum(1 for p in pts if _in_area(p, f))
+            if k > score:
+                best, score = f["id"], k
+        out[o["id"]] = best if score * 2 >= len(pts) else None
+    return out
+
+
+# Where each kind of export goes (the targets offered in the Export boundaries window). The DJI
+# Agras and XAG layouts copy what Pix4Dfields writes for those drones ("Operations" export).
+#   generic     boundaries and obstacles as separate polygons tagged BOUNDARY / OBSTACLE, as KML,
+#               GeoJSON or Shapefile (Pix4Dfields' boundary export)
+#   dji_mapping one KML per field, boundary only: a mapping area for DJI Pilot 2 (M4E, M400 ...)
+#   dji_agras   DJI/ShapeFile/<field>_Boundary.shp (+shx, dbf, prj, cpg) for the Agras remote
+#               controller's SD card: one polygon per field, obstacles as holes, with the rate
+#               (dose_ha, L/ha), height and line_space (m) the controller reads
+#   xag         <project>/<field>_Boundary.kml (boundary placemark + obstacles placemark) and
+#               <field>.geojson (Area + Obstacle features), for the XAG FMS portal
+#   ceres       KML, each field a single simple polygon (Ceres Air Applicator View)
+TARGETS = {
+    "generic": {"formats": ("kml", "geojson", "shp"), "obstacles": "separate"},
+    "dji_mapping": {"formats": ("kml",), "obstacles": None},
+    "dji_agras": {"formats": ("shp",), "obstacles": "holes"},
+    "xag": {"formats": ("kml",), "obstacles": "separate"},
+    "ceres": {"formats": ("kml",), "obstacles": None},
+}
+GAL_AC_TO_L_HA = 9.35396
+FT = 0.3048
+
+
+def _safe_file(s):
+    return re.sub(r'[\\/:*?"<>|]+', "-", s).strip(" .") or "field"
+
+
+def export_outlines(areas, ids, epsg, out_dir, target="generic", fmt="kml", per_field=True, obstacles=True,
+                    base="fields", spray=None):
+    """Write the chosen fields (and the obstacles inside them) for another program. Returns the
+    files written. spray: {rate_gal_ac, height_ft, width_ft} for dji_agras."""
+    from pyproj import Transformer
+    import datetime
+    t = TARGETS.get(target)
+    if t is None:
+        raise ValueError("Unknown export target: %s" % target)
+    fmt = fmt if fmt in t["formats"] else t["formats"][0]
+    if target in ("dji_agras", "xag", "dji_mapping", "ceres"):
+        per_field = True
+    tr = Transformer.from_crs(epsg, 4326, always_xy=True)
+
+    def ll(ring):
+        xs, ys = tr.transform([p[0] for p in ring], [p[1] for p in ring])
+        r = [[round(float(x), 9), round(float(y), 9)] for x, y in zip(xs, ys)]
+        if r and r[0] != r[-1]:
+            r.append(list(r[0]))
+        return r
+
+    def ccw(ring, want_ccw):
+        a = sum(ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1] for i in range(len(ring) - 1))
+        return ring if (a > 0) == want_ccw else ring[::-1]
+
+    parents = obstacle_parents(areas)
+    fields = [a for a in areas if a["id"] in ids and a.get("role") != "obstacle"]
+    if not fields:
+        raise ValueError("Choose at least one field (obstacles are exported with the field they are in).")
+    obs_of = {f["id"]: [a for a in areas if a.get("role") == "obstacle" and parents.get(a["id"]) == f["id"]]
+              for f in fields}
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    groups = [[f] for f in fields] if per_field else [fields]
+    if target == "dji_agras":
+        out_dir = os.path.join(out_dir, "DJI", "ShapeFile")
+    elif target == "xag":
+        out_dir = os.path.join(out_dir, _safe_file(base))
+    os.makedirs(out_dir, exist_ok=True)
+    files = []
+    for grp in groups:
+        stem = _safe_file(grp[0]["name"]) if per_field else _safe_file(base)
+        feats = []     # (name, role, [rings lon/lat])
+        for f in grp:
+            outer = [ccw(ll(f["rings"][0]), True)]
+            holes = [ccw(ll(r), False) for r in f["rings"][1:]]
+            obs = obs_of[f["id"]] if obstacles and t["obstacles"] else []
+            if t["obstacles"] == "holes":
+                holes += [ccw(ll(o["rings"][0]), False) for o in obs]
+                obs = []
+            feats.append((f["name"], "BOUNDARY", outer + holes))
+            for o in obs:
+                feats.append((o["name"], "OBSTACLE", [ccw(ll(o["rings"][0]), True)]))
+        if target == "dji_agras":
+            files += _write_agras_shp(out_dir, stem + "_Boundary", feats[0], spray or {})
+        elif target == "xag":
+            p = os.path.join(out_dir, stem + "_Boundary.kml")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(_xag_kml(feats))
+            files.append(p)
+            p = os.path.join(out_dir, stem + ".geojson")
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"type": "FeatureCollection", "name": "layer",
+                           "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}},
+                           "features": [{"type": "Feature",
+                                         "properties": ({"name": n, "type": "Area"} if r == "BOUNDARY" else {"type": "Obstacle"}),
+                                         "geometry": {"type": "Polygon", "coordinates": rings}} for n, r, rings in feats]}, fh)
+            files.append(p)
+        elif fmt == "kml":
+            p = os.path.join(out_dir, stem + ".kml")
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(_kml_doc(feats, now, typed=(target == "generic")))
+            files.append(p)
+        elif fmt == "geojson":
+            p = os.path.join(out_dir, stem + ".geojson")
+            fc = {"type": "FeatureCollection", "features": [
+                {"type": "Feature", "properties": {"name": n, "visualType": r, "creationDate": now},
+                 "geometry": {"type": "Polygon", "coordinates": rings}} for n, r, rings in feats]}
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump(fc, fh)
+            files.append(p)
+        else:
+            files += _write_shp(out_dir, stem, feats, now)
+    return files
+
+
+def _xag_kml(feats):
+    """Boundary placemark plus one placemark holding every obstacle (as Pix4Dfields writes for XAG)."""
+    def ring_xml(ring, tag, ind):
+        return "%s<%s><LinearRing><coordinates>%s</coordinates></LinearRing></%s>\n" % (
+            ind, tag, " ".join("%.9f,%.9f" % (x, y) for x, y in ring), tag)
+    name, _, rings = feats[0]
+    obs = [f for f in feats[1:] if f[1] == "OBSTACLE"]
+    o = io.StringIO()
+    o.write('<?xml version="1.0" encoding="utf-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n <Document id="root_doc">\n'
+            '  <Schema id="layer" name="layer">\n   <SimpleField name="type" type="string"/>\n'
+            '   <SimpleField name="visualType" type="string"/>\n  </Schema>\n')
+    def pm(k, desc, typ, body):
+        o.write('  <Placemark id="layer.%d">\n   <name>%s</name>\n   <description>%s</description>\n'
+                '   <Style><LineStyle><color>ff0000ff</color></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>\n'
+                '   <ExtendedData><SchemaData schemaUrl="#layer"><SimpleData name="type">%s</SimpleData>'
+                '<SimpleData name="visualType">%s</SimpleData></SchemaData></ExtendedData>\n%s  </Placemark>\n'
+                % (k, _xml_escape(name), desc, typ, typ.upper(), body))
+    body = "   <Polygon>\n" + ring_xml(rings[0], "outerBoundaryIs", "    ") + "".join(
+        ring_xml(r, "innerBoundaryIs", "    ") for r in rings[1:]) + "   </Polygon>\n"
+    pm(1, "Boundaries", "boundary", body)
+    if obs:
+        body = "   <MultiGeometry>\n" + "".join(
+            "    <Polygon>\n" + ring_xml(r[2][0], "outerBoundaryIs", "     ") + "    </Polygon>\n" for r in obs) + "   </MultiGeometry>\n"
+        pm(2, "Obstacles", "obstacle", body)
+    o.write(" </Document>\n</kml>\n")
+    return o.getvalue()
+
+
+def _write_agras_shp(out_dir, stem, feat, spray):
+    """One polygon (obstacles as holes) with the fields the Agras controller reads."""
+    import shapefile
+    name, _, rings = feat
+    base = os.path.join(out_dir, stem)
+    w = shapefile.Writer(base, shapeType=shapefile.POLYGON, encoding="utf-8")
+    w.field("dose_ha", "N", 24, 15)
+    w.field("height", "N", 24, 15)
+    w.field("line_space", "N", 24, 15)
+    w.field("name", "C", 80)
+    w.poly([rings[0][::-1]] + [r[::-1] for r in rings[1:]])     # outer clockwise, holes counter-clockwise
+    w.record(float(spray.get("rate_gal_ac") or 0) * GAL_AC_TO_L_HA, float(spray.get("height_ft") or 0) * FT,
+             float(spray.get("width_ft") or 0) * FT, name[:80])
+    w.close()
+    with open(base + ".prj", "w") as fh:
+        fh.write(_WGS84_PRJ)
+    with open(base + ".cpg", "w") as fh:
+        fh.write("UTF-8")
+    return [base + ext for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg")]
+
+
+def _kml_doc(feats, now, typed=True):
+    o = io.StringIO()
+    o.write('<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n <Document>\n')
+    if typed:
+        o.write('  <Schema id="layer" name="layer">\n   <SimpleField name="creationDate" type="string"/>\n'
+                '   <SimpleField name="visualType" type="string"/>\n  </Schema>\n')
+    for k, (name, role, rings) in enumerate(feats):
+        col = "ff0000ff" if role == "OBSTACLE" else "ff00ffff"
+        o.write('  <Placemark id="feature.%d">\n   <name>%s</name>\n' % (k + 1, _xml_escape(name)))
+        o.write('   <Style><LineStyle><color>%s</color><width>2</width></LineStyle><PolyStyle><fill>0</fill></PolyStyle></Style>\n' % col)
+        if typed:
+            o.write('   <ExtendedData><SchemaData schemaUrl="#layer">'
+                    '<SimpleData name="creationDate">%s</SimpleData><SimpleData name="visualType">%s</SimpleData>'
+                    '</SchemaData></ExtendedData>\n' % (now, role))
+        o.write("   <Polygon>\n")
+        for i, ring in enumerate(rings):
+            tag = "outerBoundaryIs" if i == 0 else "innerBoundaryIs"
+            o.write("    <%s><LinearRing><coordinates>%s</coordinates></LinearRing></%s>\n" % (
+                tag, " ".join("%.9f,%.9f,0" % (x, y) for x, y in ring), tag))
+        o.write("   </Polygon>\n  </Placemark>\n")
+    o.write(" </Document>\n</kml>\n")
+    return o.getvalue()
+
+
+_WGS84_PRJ = ('GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+              'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]')
+
+
+def _write_shp(out_dir, stem, feats, now):
+    import shapefile
+    base = os.path.join(out_dir, stem)
+    w = shapefile.Writer(base, shapeType=shapefile.POLYGON, encoding="utf-8")
+    w.field("name", "C", 80)
+    w.field("visualType", "C", 16)
+    w.field("created", "C", 20)
+    for name, role, rings in feats:
+        # shapefile rings: outer clockwise, holes counter-clockwise
+        out = [rings[0][::-1]] + [r[::-1] for r in rings[1:]]
+        w.poly(out)
+        w.record(name[:80], role, now)
+    w.close()
+    with open(base + ".prj", "w") as fh:
+        fh.write(_WGS84_PRJ)
+    with open(base + ".cpg", "w") as fh:
+        fh.write("UTF-8")
+    return [base + ext for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg")]
