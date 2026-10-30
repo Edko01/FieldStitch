@@ -60,7 +60,7 @@
     <button class="railbtn" data-panel="process" id="railProcess"><svg><use href="#i-process"/></svg><span>Process</span></button>
     <button class="railbtn" data-panel="layers" id="railLayers"><svg><use href="#i-layers"/></svg><span>Layers</span></button>
     <button class="railbtn" data-panel="areas" id="railAreas"><svg><use href="#i-areas"/></svg><span>Areas</span></button>
-    <button class="railbtn" id="railExport"><svg><use href="#i-export"/></svg><span>Export</span></button>
+    <button class="railbtn" data-panel="export" id="railExport"><svg><use href="#i-export"/></svg><span>Export</span></button>
   </nav>
 
   <!-- ===== side panels ===== -->
@@ -187,6 +187,14 @@
           <button class="primary" id="btnExportAreas">Export GeoTIFFs…</button>
           <button class="ghost" id="btnOutlines">Export boundaries…</button>
         </div>
+      </div>
+    </section>
+    <section class="pane" id="paneExport" data-pane="export" hidden>
+      <header class="panehead"><h2>Export</h2><button class="iconbtn sm" data-closepane aria-label="Close panel"><svg><use href="#i-close"/></svg></button></header>
+      <div class="exportlist">
+        <button class="startbtn" id="exGeotiff"><svg><use href="#i-tif"/></svg><span><b>GeoTIFF…</b><small>The whole orthomosaic or one file per area, for GIS and farm software</small></span></button>
+        <button class="startbtn" id="exXag"><svg><use href="#i-grid"/></svg><span><b>XAG map tiles…</b><small>The whole orthomosaic as a tile folder for the XAG One app (one GitHub repo per map)</small></span></button>
+        <button class="startbtn" id="exBounds"><svg><use href="#i-areas"/></svg><span><b>Field boundaries…</b><small>For DJI Pilot 2, DJI Agras, XAG, Ceres and other software</small></span></button>
       </div>
     </section>
   </aside>
@@ -443,6 +451,40 @@
       <button class="ghost" value="cancel">Close</button>
       <button class="ghost" type="button" id="bndOpen" hidden>Open folder</button>
       <button class="primary" id="bndGo" value="export">Export</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===== XAG map tiles ===== -->
+<dialog class="modal wide" id="xyzDlg" aria-labelledby="xyzTitle">
+  <form method="dialog" id="xyzForm">
+    <header class="modalhead"><h2 id="xyzTitle">XAG map tiles</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
+    <p class="hint small">The whole orthomosaic as one folder of web-map tiles (256 px PNG, {z}/{x}/{y}.png). Upload the folder to its own GitHub repository and the XAG One app loads it as a base map. Empty tiles are left out.</p>
+    <div class="xyzgrid">
+      <label title="The name of the GitHub repository that will hold this map">Map name (GitHub repo)<input id="xyzName" autocomplete="off" spellcheck="false" maxlength="100"></label>
+      <label>GitHub account<input id="xyzOwner" autocomplete="off" spellcheck="false"></label>
+      <label>From zoom<input type="number" id="xyzZmin" min="0" max="23" step="1"></label>
+      <label>To zoom<input type="number" id="xyzZmax" min="0" max="23" step="1"></label>
+    </div>
+    <p class="hint small" id="xyzZoomNote"></p>
+    <label>Save in
+      <span class="pathrow"><input id="xyzParent" spellcheck="false"><button type="button" class="ghost" id="xyzBrowse">Browse…</button></span>
+    </label>
+    <div class="xyzinfo">
+      <div><small>Folder</small><b id="xyzFolder">–</b></div>
+      <div><small>Tile address for XAG One</small><code id="xyzUrl">–</code></div>
+      <div><small>Tiles to make</small><b id="xyzCount">–</b></div>
+    </div>
+    <p class="hint small" id="xyzExisting" hidden></p>
+    <div class="bar" id="xyzBarWrap" hidden><i id="xyzBar"></i></div>
+    <p class="form-error" id="xyzErr" role="alert"></p>
+    <div class="p2ok" id="xyzDone" role="status" hidden></div>
+    <ul class="xyznotes" id="xyzNotes" hidden></ul>
+    <div class="btnrow end">
+      <button class="ghost" value="cancel">Close</button>
+      <button class="ghost" type="button" id="xyzCopy" hidden>Copy tile address</button>
+      <button class="ghost" type="button" id="xyzOpen" hidden>Open folder</button>
+      <button class="primary" id="xyzGo" value="export">Make tiles</button>
     </div>
   </form>
 </dialog>

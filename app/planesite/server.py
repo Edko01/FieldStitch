@@ -933,6 +933,101 @@ def export_worker(ids, out_dir, compression, scale=1.0, overviews=True, whole=Fa
         S.export.update(finished=True, error=str(e))
 
 
+# ------------------------------------------------------------------- XAG / XYZ map tiles
+_XYZ_PLAN = {}
+
+
+def _xyz_plan(zmin, zmax):
+    from . import xyztiles
+    op = S.ortho_path()
+    key = (op, os.path.getmtime(op))
+    o = _XYZ_PLAN.get(key)
+    if o is None:
+        _XYZ_PLAN.clear()
+        o = _XYZ_PLAN[key] = xyztiles._Ortho(op)
+    return o, {z: len(o.tiles(z)) for z in range(zmin, zmax + 1)}
+
+
+def _xyz_zooms(b):
+    try:
+        zmin, zmax = int(b.get("zmin", 14)), int(b.get("zmax", 20))
+    except (TypeError, ValueError):
+        raise ApiError("Enter whole numbers for the zoom levels.")
+    if not (0 <= zmin <= zmax <= 23):
+        raise ApiError("Zoom levels go from 0 to 23, and the first can't be above the last.")
+    return zmin, zmax
+
+
+def xyz_settings():
+    from . import xyztiles
+    if not S.proj or not S.ortho_path():
+        raise ApiError("Open a project with an orthomosaic first.")
+    rep = S.report() or {}
+    last = S.cfg.get("xyz") or {}
+    gsd = float(rep.get("gsd_cm") or 0) / 100.0
+    lat = 30.0
+    if S.origin:
+        from .geo import Geo
+        lat = Geo(S.origin[0]).to_ll(S.origin[1], S.origin[2])[1]
+    # the zoom whose tiles are as sharp as the orthomosaic itself
+    full = int(math.ceil(math.log2(156543.034 * math.cos(math.radians(lat)) / gsd))) if gsd > 0 else 20
+    return {"name": xyztiles.repo_name(S.proj["name"]), "owner": last.get("owner") or "Edko01",
+            "parent": last.get("parent") or os.path.join(S.dir, "exports", "XAG tiles"),
+            "zmin": int(last.get("zmin", 14)), "zmax": int(last.get("zmax", 20)), "full_zoom": full,
+            "m_px_z0": 156543.034 * math.cos(math.radians(lat)),
+            "gsd_cm": rep.get("gsd_cm")}
+
+
+def xyz_check(b):
+    """Tiles to render for these zooms, and what's already in the folder."""
+    from . import xyztiles
+    if not S.proj or not S.ortho_path():
+        raise ApiError("Open a project with an orthomosaic first.")
+    zmin, zmax = _xyz_zooms(b)
+    _, counts = _xyz_plan(zmin, zmax)
+    name = xyztiles.repo_name(b.get("name") or S.proj["name"])
+    root = os.path.join(b.get("parent") or "", name) if b.get("parent") else ""
+    old = [n for n in os.listdir(root) if n.isdigit()] if root and os.path.isdir(root) else []
+    return {"name": name, "counts": counts, "total": sum(counts.values()), "folder": root,
+            "existing_zooms": sorted(int(n) for n in old), "git": bool(root) and os.path.isdir(os.path.join(root, ".git")),
+            "url": xyztiles.tile_url((b.get("owner") or "").strip(), name)}
+
+
+def xyz_start(b):
+    from . import xyztiles
+    if not S.proj or not S.ortho_path():
+        raise ApiError("Open a project with an orthomosaic first.")
+    if S.export and not S.export.get("finished"):
+        raise ApiError("An export is already running.")
+    zmin, zmax = _xyz_zooms(b)
+    parent = (b.get("parent") or "").strip()
+    if not parent:
+        raise ApiError("Choose where to save the tiles.")
+    name = xyztiles.repo_name(b.get("name") or S.proj["name"])
+    owner = (b.get("owner") or "").strip()
+    root = os.path.join(parent, name)
+    S.cfg["xyz"] = {"owner": owner, "parent": parent, "zmin": zmin, "zmax": zmax}
+    S.save_cfg()
+    _, counts = _xyz_plan(zmin, zmax)
+    S.export = {"kind": "xyz", "done": 0, "total": sum(counts.values()), "current": "XAG tiles", "frac": 0,
+                "files": [], "errors": [], "out_dir": root, "finished": False, "summary": None,
+                "url": xyztiles.tile_url(owner, name), "name": name}
+    op = S.ortho_path()
+
+    def work():
+        try:
+            def prog(done, total, z):
+                S.export.update(done=done, total=total, current="XAG tiles, zoom %d" % z)
+            r = xyztiles.export(op, root, zmin, zmax, progress=prog)
+            r["notes"] = xyztiles.github_notes(r["bytes"])
+            S.export.update(summary=r, done=S.export["total"], current="", finished=True)
+        except Exception as e:
+            traceback.print_exc()
+            S.export.update(finished=True, error=str(e))
+    threading.Thread(target=work, daemon=True).start()
+    return {"folder": root, "total": S.export["total"]}
+
+
 def export_estimate(b):
     """Approximate output size for the export dialog."""
     from .export import area_stats
@@ -1264,6 +1359,8 @@ class Handler(BaseHTTPRequestHandler):
                     "running": S.running() if S.dir else False, "progress": progress_state(),
                     "scan": S.scan, "export": S.export, "platform": sys.platform,
                     "update": dict(updater.state)}
+        if path == "/api/xyz/settings":
+            return xyz_settings()
         if path == "/api/plan/start":
             lp = S.cfg.get("last_place")
             return {"last": lp, "dir": S.cfg.get("projects_dir") or default_projects_dir()}
@@ -1373,6 +1470,10 @@ class Handler(BaseHTTPRequestHandler):
             S.cfg["projects_dir"] = parent
             open_project(d)
             return {"dir": d}
+        if path == "/api/xyz/check":
+            return xyz_check(b)
+        if path == "/api/xyz/export":
+            return xyz_start(b)
         if path == "/api/plan/new":
             return plan_project(b)
         if path == "/api/locate":

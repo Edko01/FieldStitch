@@ -1599,6 +1599,15 @@ async function startExport() {
 function renderExportProgress() {
   const ex = status.export;
   const running = busyExport();
+  if (ex && ex.kind === "xyz") {
+    if (running) {
+      $("xyzBarWrap").hidden = false;
+      $("xyzBar").style.width = (ex.total ? (100 * ex.done) / ex.total : 2) + "%";
+      $("xyzGo").disabled = true;
+    } else if (exportWasRunning) xyzFinished(ex);
+    exportWasRunning = !!running;
+    return;
+  }
   if (exportWasRunning && !running && ex) {
     if (ex.error) toast("Export failed: " + ex.error, 8000);
     else {
@@ -1608,6 +1617,90 @@ function renderExportProgress() {
     }
   }
   exportWasRunning = !!running;
+}
+
+// ------------------------------------------------------------------ XAG map tiles
+const xyz = { timer: 0, seq: 0, folder: "", url: "" };
+async function openXyz() {
+  setErr("xyzErr", "");
+  ["xyzDone", "xyzNotes", "xyzOpen", "xyzCopy", "xyzBarWrap", "xyzExisting"].forEach((id) => ($(id).hidden = true));
+  $("xyzGo").disabled = busyExport();
+  let st;
+  try { st = await api("/api/xyz/settings"); } catch (e) { return toast(e.message); }
+  $("xyzName").value = st.name;
+  $("xyzOwner").value = st.owner;
+  $("xyzParent").value = st.parent;
+  $("xyzZmin").value = st.zmin;
+  $("xyzZmax").value = st.zmax;
+  xyz.full = st.full_zoom;
+  xyz.gsd = st.gsd_cm;
+  xyz.m0 = st.m_px_z0;
+  if (!$("xyzDlg").open) $("xyzDlg").showModal();
+  xyzCheck();
+}
+const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: $("xyzOwner").value.trim(), parent: $("xyzParent").value.trim(),
+                         zmin: +$("xyzZmin").value, zmax: +$("xyzZmax").value });
+function xyzCheckSoon() { clearTimeout(xyz.timer); xyz.timer = setTimeout(xyzCheck, 350); }
+async function xyzCheck() {
+  const seq = ++xyz.seq;
+  const b = xyzRead();
+  const zmax = b.zmax;
+  const cm = xyz.m0 ? (xyz.m0 / 2 ** zmax) * 100 : 0;
+  $("xyzZoomNote").textContent = xyz.gsd && cm
+    ? "At zoom " + zmax + " a tile pixel covers about " + fmt(cm, cm < 10 ? 1 : 0) + " cm (" + fmt(cm / 2.54, 1) + " in); the orthomosaic is " +
+      fmt(xyz.gsd, 1) + " cm. Each zoom level up has about 4 times the tiles of the one below." +
+      (zmax > xyz.full ? " Above zoom " + xyz.full + " there is no extra detail, only more files." : "")
+    : "";
+  try {
+    const r = await api("/api/xyz/check", b);
+    if (seq !== xyz.seq) return;
+    setErr("xyzErr", "");
+    xyz.folder = r.folder; xyz.url = r.url;
+    $("xyzFolder").textContent = r.folder || "–";
+    $("xyzUrl").textContent = r.url;
+    const zs = Object.keys(r.counts).map(Number);
+    $("xyzCount").textContent = "Up to " + fmt(r.total) + " (zoom " + zs[0] + ": " + fmt(r.counts[zs[0]]) +
+      (zs.length > 1 ? " … zoom " + zs[zs.length - 1] + ": " + fmt(r.counts[zs[zs.length - 1]]) : "") + "). Empty tiles are left out.";
+    const ex = r.existing_zooms;
+    $("xyzExisting").hidden = !ex.length;
+    if (ex.length) $("xyzExisting").textContent = "This folder already has tiles (zoom " + ex[0] + (ex.length > 1 ? "–" + ex[ex.length - 1] : "") +
+      "). They'll be replaced; " + (r.git ? "the Git files and anything else in the folder are kept." : "other files in the folder are kept.");
+  } catch (e) { if (seq === xyz.seq) setErr("xyzErr", e.message); }
+}
+async function xyzStart() {
+  setErr("xyzErr", "");
+  ["xyzDone", "xyzNotes", "xyzOpen", "xyzCopy"].forEach((id) => ($(id).hidden = true));
+  $("xyzGo").disabled = true;
+  try {
+    await api("/api/xyz/export", xyzRead());
+    exportWasRunning = true;
+    $("xyzBarWrap").hidden = false;
+    $("xyzBar").style.width = "2%";
+    refresh();
+  } catch (e) { setErr("xyzErr", e.message); $("xyzGo").disabled = false; }
+}
+function xyzFinished(ex) {
+  $("xyzBarWrap").hidden = true;
+  $("xyzGo").disabled = false;
+  $("xyzGo").textContent = "Make tiles again";
+  if (!$("xyzDlg").open) $("xyzDlg").showModal();
+  if (ex.error) return setErr("xyzErr", "Making the tiles stopped: " + ex.error);
+  const r = ex.summary;
+  xyz.folder = ex.out_dir; xyz.url = ex.url;
+  const d = $("xyzDone");
+  d.innerHTML = "";
+  const line = (txt) => { const p = document.createElement("p"); p.textContent = txt; d.append(p); };
+  line("Made " + fmt(r.tiles) + " tiles, " + fmtBytes(r.bytes) + ", in " + ex.out_dir + ". " +
+       fmt(r.skipped_empty) + " empty tiles were left out.");
+  line("Next: upload the folder's contents to the GitHub repository “" + ex.name + "” (main branch) and use the tile address above in XAG One.");
+  d.hidden = false;
+  const ul = $("xyzNotes");
+  ul.innerHTML = "";
+  for (const n of r.notes || []) { const li = document.createElement("li"); li.textContent = n; ul.append(li); }
+  ul.hidden = !(r.notes || []).length;
+  $("xyzOpen").hidden = false;
+  $("xyzCopy").hidden = false;
+  xyzCheck();
 }
 
 // ------------------------------------------------------------------ projects dashboard
@@ -1697,7 +1790,17 @@ function closeMenu() { $("moreMenu").hidden = true; $("btnMore").setAttribute("a
 function wire() {
   document.querySelectorAll(".railbtn[data-panel]").forEach((b) => (b.onclick = () => setPanel(panel === b.dataset.panel ? null : b.dataset.panel)));
   document.querySelectorAll("[data-closepane]").forEach((b) => (b.onclick = () => setPanel(null)));
-  $("railExport").onclick = () => openExport(false);
+  $("exGeotiff").onclick = () => openExport(false);
+  $("exXag").onclick = openXyz;
+  $("exBounds").onclick = openOutlines;
+  ["xyzName", "xyzOwner", "xyzParent", "xyzZmin", "xyzZmax"].forEach((id) => ($(id).oninput = xyzCheckSoon));
+  $("xyzBrowse").onclick = async () => { const p = await browse("folder", "Save the map's tile folder in", $("xyzParent").value); if (p) { $("xyzParent").value = p; xyzCheck(); } };
+  $("xyzOpen").onclick = () => api("/api/open_path", { path: xyz.folder });
+  $("xyzCopy").onclick = async () => {
+    try { await navigator.clipboard.writeText(xyz.url); toast("Tile address copied."); }
+    catch (e) { toast("Couldn't copy. Select the address in the window and copy it."); }
+  };
+  $("xyzForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); xyzStart(); } };
 
   // top bar
   $("btnProjects").onclick = () => {
