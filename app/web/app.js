@@ -1963,5 +1963,15 @@ wire();
 $("btnUpdate").onclick = () => checkUpdates(false);
 $("updClose").onclick = () => { if (!updRestarting) $("updDlg").close(); };
 $("updInstall").onclick = installUpdate;
-refresh();
+// PlaneSite opens on the Projects page. A project left open in the background (the window was
+// closed and opened again) is closed first, unless it's processing, reading photos or exporting.
+(async () => {
+  try {
+    const st = await api("/api/status", undefined, 15000);
+    const p = st.project;
+    const busy = st.running || (st.scan && !st.scan.finished) || (st.export && !st.export.finished);
+    if (p && !busy) await api("/api/project/close", {});
+  } catch (e) { /* refresh() reports a lost connection */ }
+  refresh();
+})();
 setTimeout(() => checkUpdates(true), 2500);
