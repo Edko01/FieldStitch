@@ -26,8 +26,11 @@ CREDIT = "Imagery: USDA NAIP via USGS The National Map"
 TILE = 256
 
 _slots = threading.BoundedSemaphore(6)      # requests to the image service at once
-_down_until = [0.0]                          # after a failed request, don't retry for a while
 _UA = {"User-Agent": "PlaneSite/2.0 (drone mapping desktop app; github.com/Edko01/PlaneSite)"}
+BLOCK = 4                                    # tiles are fetched 4 x 4 at a time (one 1024 px image)
+_block_locks = {}
+_block_locks_lock = threading.Lock()
+ERROR = "error"
 
 
 def _get(url, timeout=20):
@@ -43,10 +46,8 @@ def tile_bounds(z, x, y, origin, r0):
     return e0 + x * m, n0 - (y + 1) * m, e0 + (x + 1) * m, n0 - y * m
 
 
-def tile(cache_dir, z, x, y, origin, r0):
-    """(bytes, content type) of one base-map tile, or None when there's no imagery or no internet."""
-    epsg, e0, n0 = origin
-    d = os.path.join(cache_dir, "%d_%d_%d" % (epsg, e0, n0), str(z))
+def _cached(d, x, y):
+    """(bytes, type) / None (no imagery there) / False (not fetched yet)."""
     for ext, ctype in ((".jpg", "image/jpeg"), (".png", "image/png"), (".none", None)):
         p = os.path.join(d, "%d_%d%s" % (x, y, ext))
         if os.path.exists(p):
@@ -54,33 +55,88 @@ def tile(cache_dir, z, x, y, origin, r0):
                 return None
             with open(p, "rb") as f:
                 return f.read(), ctype
-    if time.time() < _down_until[0]:
-        return None
-    xmin, ymin, xmax, ymax = tile_bounds(z, x, y, origin, r0)
+    return False
+
+
+def tile(cache_dir, z, x, y, origin, r0):
+    """(bytes, content type) of one base-map tile, None where there's no imagery, or ERROR when the
+    image service couldn't be reached (the window tries again).
+
+    The image service takes about as long for a 1024 px image as for a 256 px one, so tiles are
+    fetched in blocks of 4 x 4: the first tile of a block asked for fetches all 16, and the others
+    come from disk."""
+    epsg, e0, n0 = origin
+    d = os.path.join(cache_dir, "%d_%d_%d" % (epsg, e0, n0), str(z))
+    hit = _cached(d, x, y)
+    if hit is not False:
+        return hit
+    bx, by = (x // BLOCK) * BLOCK, (y // BLOCK) * BLOCK
+    key = (d, bx, by)
+    with _block_locks_lock:
+        lk = _block_locks.setdefault(key, threading.Lock())
+    with lk:
+        hit = _cached(d, x, y)            # another request may have fetched the block meanwhile
+        if hit is not False:
+            return hit
+        if not _fetch_block(d, z, bx, by, origin, r0):
+            return ERROR
+    with _block_locks_lock:
+        _block_locks.pop(key, None)
+    hit = _cached(d, x, y)
+    return None if hit is False else hit
+
+
+def _fetch_block(d, z, bx, by, origin, r0):
+    import io
+    import numpy as np
+    from PIL import Image
+    epsg = origin[0]
+    xmin, _, _, ymax = tile_bounds(z, bx, by, origin, r0)
+    _, ymin, xmax, _ = tile_bounds(z, bx + BLOCK - 1, by + BLOCK - 1, origin, r0)
+    n = TILE * BLOCK
     q = urllib.parse.urlencode({
         "bbox": "%.3f,%.3f,%.3f,%.3f" % (xmin, ymin, xmax, ymax), "bboxSR": epsg, "imageSR": epsg,
-        "size": "%d,%d" % (TILE, TILE), "format": "jpgpng", "transparent": "true", "bandIds": "0,1,2",
+        "size": "%d,%d" % (n, n), "format": "jpgpng", "transparent": "true", "bandIds": "0,1,2",
         "interpolation": "RSP_BilinearInterpolation", "f": "image"})
-    with _slots:
-        try:
-            with _get(NAIP_EXPORT + "?" + q) as r:
-                data = r.read()
-                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
-        except Exception:
-            _down_until[0] = time.time() + 30
-            return None
-    if not ctype.startswith("image/") or len(data) < 100:
-        return None
+    data = None
+    for attempt in range(2):
+        with _slots:
+            try:
+                with _get(NAIP_EXPORT + "?" + q, timeout=30) as r:
+                    data = r.read()
+                    ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+                break
+            except Exception:
+                data = None
+        time.sleep(0.5)
+    if not data or not ctype.startswith("image/"):
+        return False
+    try:
+        im = np.array(Image.open(io.BytesIO(data)).convert("RGBA"))
+    except Exception:
+        return False
+    if im.shape[0] != n or im.shape[1] != n:
+        im = np.array(Image.fromarray(im).resize((n, n)))
     os.makedirs(d, exist_ok=True)
-    ext = ".png" if ctype == "image/png" else ".jpg"
-    if ext == ".png" and _blank_png(data):
-        open(os.path.join(d, "%d_%d.none" % (x, y)), "wb").close()     # outside the imagery
-        return None
-    tmp = os.path.join(d, "%d_%d%s.part" % (x, y, ext))
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, os.path.join(d, "%d_%d%s" % (x, y, ext)))
-    return data, ctype
+    for j in range(BLOCK):
+        for i in range(BLOCK):
+            t = im[j * TILE:(j + 1) * TILE, i * TILE:(i + 1) * TILE]
+            a = t[:, :, 3]
+            stem = os.path.join(d, "%d_%d" % (bx + i, by + j))
+            if a.max() == 0:
+                open(stem + ".none", "wb").close()          # outside the imagery
+                continue
+            b = io.BytesIO()
+            if a.min() == 255:
+                Image.fromarray(t[:, :, :3]).save(b, "JPEG", quality=85)
+                ext = ".jpg"
+            else:
+                Image.fromarray(t).save(b, "PNG", compress_level=3)
+                ext = ".png"
+            with open(stem + ext + ".part", "wb") as f:
+                f.write(b.getvalue())
+            os.replace(stem + ext + ".part", stem + ext)
+    return True
 
 
 def _blank_png(data):

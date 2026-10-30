@@ -812,6 +812,14 @@ function drawBase() {
   layers.base = L.tileLayer("/basemap/{z}/{x}/{y}?o=" + p.frame, {
     tileSize: 256, minZoom: -4, maxZoom: 22, minNativeZoom: -4, maxNativeZoom: 7, pane: "base",
     keepBuffer: 2, updateWhenZooming: false, updateInterval: 120 });
+  // a tile the image service didn't deliver (slow or dropped connection) is asked for again
+  layers.base.on("tileerror", (e) => {
+    const t = e.tile;
+    const n = (t._retry || 0) + 1;
+    if (n > 5) return;
+    t._retry = n;
+    setTimeout(() => { if (t.isConnected) t.src = t.src.replace(/&r=\d+$/, "") + "&r=" + n; }, 800 * n);
+  });
   if ($("lyrBase").checked) { layers.base.addTo(map); $("mapCredit").hidden = false; }
 }
 function updateAreasLock(p) {

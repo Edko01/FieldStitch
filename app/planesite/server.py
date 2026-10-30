@@ -1293,8 +1293,10 @@ class Handler(BaseHTTPRequestHandler):
                 if S.dir and S.origin:
                     res = basemap.tile(os.path.join(S.dir, "basemap"), int(m.group(1)), int(m.group(2)),
                                        int(m.group(3)), S.origin, R0)
+                if res == basemap.ERROR:          # couldn't reach the image service: the window retries
+                    return self._send(503, b"", "text/plain", {"Cache-Control": "no-store"})
                 if not res:
-                    return self._send(200, EMPTY_PNG, "image/png", {"Cache-Control": "no-store"})
+                    return self._send(200, EMPTY_PNG, "image/png", {"Cache-Control": "max-age=86400"})
                 return self._send(200, res[0], res[1], {"Cache-Control": "max-age=31536000, immutable"})
             if path == "/thumb":
                 d = (q.get("dir") or [""])[0]
