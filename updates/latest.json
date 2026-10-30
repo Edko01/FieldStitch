@@ -1,8 +1,8 @@
 {
- "version": "1.6.16",
+ "version": "1.6.17",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.16.zip",
- "sha256": "43efdbcea2530e81307b0db7b656c75e67ab62426927cc9d59c16574c476e732",
- "notes": "PlaneSite 1.6.16:\n- After you close the PlaneSite window, its background process now exits within about a minute (it could stay up to 3 minutes after an update restart).\n- Includes the 1.6.14 window fix: close the PlaneSite window and start it again after updating so the window draws without the graphics card.",
+ "app_zip": "updates/planesite-app-1.6.17.zip",
+ "sha256": "e34eee2c8f4b4aadcd448f516613f5f71523e3ba7d0815e87e81e78467ff5b08",
+ "notes": "PlaneSite 1.6.17:\n- Fixes zooming on screens with Windows display scaling of 150% or more. At some zoom levels the detailed map layer got stuck re-checking itself, leaving misplaced, mismatched or missing tiles and sometimes freezing the map. The detailed layer now stays within one level of the map, which avoids it.",
  "date": "2026-10-29"
 }
