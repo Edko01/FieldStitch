@@ -26,7 +26,7 @@ CREDIT = "Imagery: USDA NAIP via USGS The National Map"
 TILE = 256
 
 _slots = threading.BoundedSemaphore(6)      # requests to the image service at once
-_UA = {"User-Agent": "PlaneSite/2.0 (drone mapping desktop app; github.com/Edko01/PlaneSite)"}
+_UA = {"User-Agent": "PlaneSite/2.0 (drone mapping desktop app; github.com/EdkoLLC/PlaneSite)"}
 BLOCK = 4                                    # tiles are fetched 4 x 4 at a time (one 1024 px image)
 _block_locks = {}
 _block_locks_lock = threading.Lock()

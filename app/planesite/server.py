@@ -1100,7 +1100,7 @@ def xyz_settings():
         lat = Geo(S.origin[0]).to_ll(S.origin[1], S.origin[2])[1]
     # the zoom whose tiles are as sharp as the orthomosaic itself
     full = int(math.ceil(math.log2(156543.034 * math.cos(math.radians(lat)) / gsd))) if gsd > 0 else 20
-    return {"name": xyztiles.repo_name(S.proj["name"]), "owner": last.get("owner") or "Edko01",
+    return {"name": xyztiles.repo_name(S.proj["name"]), "owner": last.get("owner") or "EdkoLLC",
             "parent": last.get("parent") or os.path.join(S.dir, "exports", "XAG tiles"),
             "zmin": int(last.get("zmin", 14)), "zmax": int(last.get("zmax", 20)), "full_zoom": full,
             "m_px_z0": 156543.034 * math.cos(math.radians(lat)),
