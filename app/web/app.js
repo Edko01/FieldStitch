@@ -896,7 +896,21 @@ function plMode(kind) {
   plSync();
 }
 function plSuggest(name) { if (!pl.nameEdited && name) { $("plName").value = name; plSync(); } }
+// where the job's own folder will be: <projects folder>\<job name>
+let plWhereT = 0;
+function plWhere() {
+  clearTimeout(plWhereT);
+  plWhereT = setTimeout(async () => {
+    const name = $("plName").value.trim();
+    if (!name) { $("plWhere").textContent = ""; return; }
+    try {
+      const r = await api("/api/project/suggest", { name, parent: $("plParent").value.trim() });
+      $("plWhere").textContent = "The job gets its own folder: " + r.dir;
+    } catch (e) { $("plWhere").textContent = ""; }
+  }, 250);
+}
 function plSync() {
+  plWhere();
   const ready = (pl.kind === "file" && pl.path) || (pl.kind === "lib" && pl.libSel) || (pl.kind === "find" && pl.pt);
   $("plCreate").disabled = !(ready && $("plName").value.trim());
 }
@@ -1953,7 +1967,8 @@ function wire() {
   $("plLast").onclick = () => { plMapInit(); plSetPoint(pl.last.lat, pl.last.lon, "Last job (" + (pl.last.name || "") + ")", 14); };
   $("plName").oninput = () => { pl.nameEdited = !!$("plName").value.trim(); plSync(); };
   $("plName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("plCreate").disabled) plCreate(); } };
-  $("plBrowse").onclick = async () => { const p = await browse("folder", "Save the job in", $("plParent").value); if (p) $("plParent").value = p; };
+  $("plBrowse").onclick = async () => { const p = await browse("folder", "Folder that holds your projects", $("plParent").value); if (p) { $("plParent").value = p; plWhere(); } };
+  $("plParent").oninput = plWhere;
   $("planForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); plCreate(); } };
   $("pbPhotos").onclick = () => setPanel("import");
   try { $("lyrBase").checked = localStorage.getItem("planesite.base") !== "off"; } catch (e) { /* default on */ }

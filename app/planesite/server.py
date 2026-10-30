@@ -51,6 +51,15 @@ def default_projects_dir():
     return os.path.join(docs, "PlaneSite Projects")
 
 
+def projects_dir(p=None):
+    """The folder new projects go in. A project folder chosen by mistake (one holding a PlaneSite
+    project) stands for the folder it sits in, so new projects never land inside another one."""
+    p = os.path.normpath((p or "").strip() or S.cfg.get("projects_dir") or default_projects_dir())
+    while os.path.isfile(P.project_file(p)) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    return p
+
+
 class State:
     def __init__(self):
         self.lock = threading.RLock()
@@ -330,7 +339,7 @@ def quick_start(folder=None, files=None, recursive=True, parent=None, name=None)
             raise ApiError("None of those files could be found.")
     elif not folder or not os.path.isdir(folder):
         raise ApiError("Folder not found: %s" % folder)
-    parent = parent or S.cfg.get("projects_dir") or default_projects_dir()
+    parent = projects_dir(parent)
     name = (name or "").strip() or name_from_source(folder, files)
     try:
         os.makedirs(parent, exist_ok=True)
@@ -338,7 +347,7 @@ def quick_start(folder=None, files=None, recursive=True, parent=None, name=None)
         raise ApiError("Can't create the folder %s: %s" % (parent, e.strerror or e))
     d = unique_project_dir(parent, name)
     P.create_project(d, name)
-    if os.path.normcase(parent) != os.path.normcase(S.cfg.get("projects_dir") or default_projects_dir()):
+    if os.path.normcase(parent) != os.path.normcase(projects_dir()):
         S.cfg["projects_dir"] = parent
         S.save_cfg()
     open_project(d)
@@ -368,7 +377,7 @@ def open_geotiff(path):
     if abs(units - 1.0) > 1e-6:
         raise ApiError("Only GeoTIFFs in metres are supported (this one uses other units).")
     name = os.path.splitext(os.path.basename(path))[0]
-    parent = S.cfg.get("projects_dir") or default_projects_dir()
+    parent = projects_dir()
     d = unique_project_dir(parent, name)
     proj = P.create_project(d, name)
     proj["geotiff"] = {"path": os.path.normpath(path), "epsg": int(epsg), "gsd_cm": round(gsd * 100, 2)}
@@ -658,7 +667,7 @@ def field_library():
     for d in S.cfg.get("recent", []):
         if os.path.normcase(d) not in seen:
             seen.add(os.path.normcase(d)); dirs.append(d)
-    root = S.cfg.get("projects_dir") or default_projects_dir()
+    root = projects_dir()
     try:
         for n in os.listdir(root):
             d = os.path.join(root, n)
@@ -734,7 +743,7 @@ def plan_project(b):
         origin = basemap.origin_for(lon, lat)
     else:
         raise ApiError("Choose where the field is.")
-    parent = b.get("parent") or S.cfg.get("projects_dir") or default_projects_dir()
+    parent = projects_dir(b.get("parent"))
     if S.running():
         raise ApiError("Processing is running. Wait for it to finish before starting another job.")
     d = unique_project_dir(parent, name)
@@ -1392,7 +1401,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             return {"version": __version__, "project": project_summary(),
                     "recent": [r for r in S.cfg.get("recent", []) if os.path.exists(P.project_file(r))],
-                    "default_dir": S.cfg.get("projects_dir") or default_projects_dir(),
+                    "default_dir": projects_dir(),
                     "running": S.running() if S.dir else False, "progress": progress_state(),
                     "scan": S.scan, "export": S.export, "platform": sys.platform,
                     "update": dict(updater.state)}
@@ -1400,11 +1409,11 @@ class Handler(BaseHTTPRequestHandler):
             return xyz_settings()
         if path == "/api/plan/start":
             lp = S.cfg.get("last_place")
-            return {"last": lp, "dir": S.cfg.get("projects_dir") or default_projects_dir()}
+            return {"last": lp, "dir": projects_dir()}
         if path == "/api/fields/library":
             return {"fields": field_library()}
         if path == "/api/projects":
-            return {"projects": recent_projects(), "dir": S.cfg.get("projects_dir") or default_projects_dir()}
+            return {"projects": recent_projects(), "dir": projects_dir()}
         if path == "/api/pilot2/settings":
             return pilot2_settings()
         if path == "/api/update/check":
@@ -1499,7 +1508,7 @@ class Handler(BaseHTTPRequestHandler):
             name = (b.get("name") or "").strip()
             if not name:
                 raise ApiError("Enter a project name.")
-            parent = b.get("parent") or default_projects_dir()
+            parent = projects_dir(b.get("parent"))
             d = os.path.join(parent, safe_name(name))
             if os.path.exists(P.project_file(d)):
                 raise ApiError("A project with that name already exists in %s." % parent)
@@ -1528,7 +1537,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/project/suggest":
             files = [f for f in (b.get("files") or []) if f]
             folder = b.get("folder") or None
-            parent = b.get("parent") or S.cfg.get("projects_dir") or default_projects_dir()
+            parent = projects_dir(b.get("parent"))
             name = (b.get("name") or "").strip() or name_from_source(folder, files or None)
             n_files = len(files)
             return {"name": name, "parent": parent, "dir": unique_project_dir(parent, name), "files": n_files}
@@ -1538,6 +1547,7 @@ class Handler(BaseHTTPRequestHandler):
             p = b.get("path") or ""
             if not p:
                 raise ApiError("Choose a folder.")
+            p = projects_dir(p)
             os.makedirs(p, exist_ok=True)
             S.cfg["projects_dir"] = p
             S.save_cfg()
