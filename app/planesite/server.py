@@ -55,8 +55,13 @@ def projects_dir(p=None):
     """The folder new projects go in. A project folder chosen by mistake (one holding a PlaneSite
     project) stands for the folder it sits in, so new projects never land inside another one."""
     p = os.path.normpath((p or "").strip() or S.cfg.get("projects_dir") or default_projects_dir())
-    while os.path.isfile(P.project_file(p)) and os.path.dirname(p) != p:
-        p = os.path.dirname(p)
+    while os.path.dirname(p) != p:
+        if os.path.isfile(P.project_file(p)):
+            p = os.path.dirname(p)              # a project folder
+        elif os.path.isfile(P.project_file(os.path.join(p, os.path.basename(p)))):
+            p = os.path.dirname(p)              # a job folder holding a project of the same name
+        else:                                   # (D:\Projects\Snowflake\Snowflake, next to PPK, Tiles ...)
+            break
     return p
 
 
@@ -347,9 +352,6 @@ def quick_start(folder=None, files=None, recursive=True, parent=None, name=None)
         raise ApiError("Can't create the folder %s: %s" % (parent, e.strerror or e))
     d = unique_project_dir(parent, name)
     P.create_project(d, name)
-    if os.path.normcase(parent) != os.path.normcase(projects_dir()):
-        S.cfg["projects_dir"] = parent
-        S.save_cfg()
     open_project(d)
     start_scan(folder, files, recursive)
     return d
@@ -752,7 +754,6 @@ def plan_project(b):
     proj["map_origin"] = origin
     proj["plan"] = {"created": time.strftime("%Y-%m-%d %H:%M"), "from": kind}
     P.save(d, proj)
-    S.cfg["projects_dir"] = parent
     open_project(d)
     if new_areas:
         save_areas(new_areas)
@@ -1513,7 +1514,6 @@ class Handler(BaseHTTPRequestHandler):
             if os.path.exists(P.project_file(d)):
                 raise ApiError("A project with that name already exists in %s." % parent)
             P.create_project(d, name)
-            S.cfg["projects_dir"] = parent
             open_project(d)
             return {"dir": d}
         if path == "/api/basemap/prefetch":

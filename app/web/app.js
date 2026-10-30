@@ -1967,7 +1967,12 @@ function wire() {
   $("plLast").onclick = () => { plMapInit(); plSetPoint(pl.last.lat, pl.last.lon, "Last job (" + (pl.last.name || "") + ")", 14); };
   $("plName").oninput = () => { pl.nameEdited = !!$("plName").value.trim(); plSync(); };
   $("plName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("plCreate").disabled) plCreate(); } };
-  $("plBrowse").onclick = async () => { const p = await browse("folder", "Folder that holds your projects", $("plParent").value); if (p) { $("plParent").value = p; plWhere(); } };
+  $("plBrowse").onclick = async () => {
+    const p = await browse("folder", "Folder that holds your projects", $("plParent").value);
+    if (!p) return;
+    try { $("plParent").value = (await api("/api/projects_dir", { path: p })).path; } catch (e) { $("plParent").value = p; }
+    plWhere();
+  };
   $("plParent").oninput = plWhere;
   $("planForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); plCreate(); } };
   $("pbPhotos").onclick = () => setPanel("import");
@@ -2013,7 +2018,12 @@ function wire() {
   $("npImages").onclick = () => npPick("images");
   $("npName").oninput = () => { np.nameEdited = true; $("npCreate").disabled = !$("npName").value.trim() || (!np.folder && !np.files); clearTimeout(npTimer); npTimer = setTimeout(npSuggest, 300); };
   $("npParent").onchange = npSuggest;
-  $("npBrowse").onclick = async () => { const p = await browse("folder", "Save the new project in", $("npParent").value); if (p) { $("npParent").value = p; npSuggest(); } };
+  $("npBrowse").onclick = async () => {
+    const p = await browse("folder", "Folder that holds your projects", $("npParent").value);
+    if (!p) return;
+    try { $("npParent").value = (await api("/api/projects_dir", { path: p })).path; } catch (e) { $("npParent").value = p; }
+    npSuggest();
+  };
   $("newForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "create") { e.preventDefault(); npCreate(); } };
   $("dOpen").onclick = async () => { const p = await browse("folder", "Choose a PlaneSite project folder", $("dLoc").textContent); if (p) openProject(p); };
   $("dLocChange").onclick = async () => {
