@@ -1240,10 +1240,12 @@ def lifetime_watch(srv, browser):
             if browser is not None and time.time() - started > 120:
                 break  # window closed before the page ever loaded
             continue
-        limit = 20 if browser is not None else 180
+        # 20 s after our own window closes; a little longer when this server was started without one
+        # (after an update restart the open window reconnects within seconds)
+        limit = 20 if browser is not None else 45
         if idle > limit:
             break
-    print("No window open and nothing running - closing PlaneSite.")
+    print("%s No window open and nothing running - closing PlaneSite." % time.strftime("%H:%M:%S"))
     os._exit(0)
 
 
