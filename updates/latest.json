@@ -1,8 +1,8 @@
 {
- "version": "1.6.18",
+ "version": "1.6.19",
  "runtime": 3,
- "app_zip": "updates/planesite-app-1.6.18.zip",
- "sha256": "917bddf6c2e624916ac4dcc25baa2d222d49d47f62380793441858f12dd5c00f",
- "notes": "PlaneSite 1.6.18:\n- Fixes \"Lost contact with PlaneSite\" after the computer sleeps. When the computer woke up, PlaneSite's background process saw that the window hadn't checked in for hours (it couldn't, the computer was asleep) and closed itself, leaving the window without it. It now recognises a sleep and gives the window two minutes to reconnect.\n- PlaneSite's log no longer fills up with harmless errors when the window cancels map tile requests.",
+ "app_zip": "updates/planesite-app-1.6.19.zip",
+ "sha256": "718c843d3d42a7b6da90b52f0d0f63b96ca61673c8c24e7a3aedeaa1b875be22",
+ "notes": "PlaneSite 1.6.19:\n- PlaneSite's home on GitHub moved to the Edko LLC organization (github.com/EdkoLLC/PlaneSite). Updates are now checked there. Nothing else changes.",
  "date": "2026-10-30"
 }

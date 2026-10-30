@@ -130,7 +130,7 @@ Section "PlaneSite (required)" SecMain
   WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" '"$INSTDIR\Uninstall PlaneSite.exe"'
   WriteRegStr HKCU "${UNINSTKEY}" "QuietUninstallString" '"$INSTDIR\Uninstall PlaneSite.exe" /S'
-  WriteRegStr HKCU "${UNINSTKEY}" "URLInfoAbout" "https://github.com/Edko01/PlaneSite"
+  WriteRegStr HKCU "${UNINSTKEY}" "URLInfoAbout" "https://github.com/EdkoLLC/PlaneSite"
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
   ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
