@@ -120,7 +120,7 @@ Section "PlaneSite (required)" SecMain
 
   SetOutPath "$INSTDIR"
   CreateShortCut "$SMPROGRAMS\PlaneSite.lnk" "$INSTDIR\python\PlaneSiteW.exe" '"$INSTDIR\app\main.py"' \
-    "$INSTDIR\PlaneSite.ico" 0 SW_SHOWNORMAL "" "Offline orthomosaics from drone photos"
+    "$INSTDIR\PlaneSite.ico" 0 SW_SHOWNORMAL "" "Drone mapping and spray mission planning"
 
   WriteRegStr HKCU "Software\PlaneSite" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "PlaneSite"
@@ -141,7 +141,7 @@ SectionEnd
 Section "Desktop shortcut" SecDesktop
   SetOutPath "$INSTDIR"
   CreateShortCut "$DESKTOP\PlaneSite.lnk" "$INSTDIR\python\PlaneSiteW.exe" '"$INSTDIR\app\main.py"' \
-    "$INSTDIR\PlaneSite.ico" 0 SW_SHOWNORMAL "" "Offline orthomosaics from drone photos"
+    "$INSTDIR\PlaneSite.ico" 0 SW_SHOWNORMAL "" "Drone mapping and spray mission planning"
 SectionEnd
 
 LangString DESC_SecMain ${LANG_ENGLISH} "The PlaneSite program and its processing engine."

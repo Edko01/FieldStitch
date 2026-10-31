@@ -87,3 +87,29 @@ def open_window(url):
     import webbrowser
     webbrowser.open(url)
     return None
+
+
+# ------------------------------------------------------------------ Windows shortcuts
+DESCRIPTION = "Drone mapping and spray mission planning"     # the shortcuts' tooltip; the installer uses the same text
+
+
+def refresh_shortcuts():
+    """Bring the tooltip of existing PlaneSite shortcuts (desktop, Start menu) up to date, so a
+    change of wording reaches computers that installed an earlier version. Best effort, quiet,
+    and only touches shortcuts named PlaneSite.lnk that point at this installation."""
+    if sys.platform != "win32":
+        return
+    target = os.path.normcase(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    ps = (
+        "$d = '%s'; $t = '%s'; $s = New-Object -ComObject WScript.Shell;"
+        "foreach ($f in @('Desktop','CommonDesktopDirectory','Programs','CommonPrograms')) {"
+        " $p = Join-Path ([Environment]::GetFolderPath($f)) 'PlaneSite.lnk';"
+        " if (Test-Path $p) { $l = $s.CreateShortcut($p);"
+        "  if ($l.TargetPath.ToLower().StartsWith($t) -and $l.Description -ne $d) { $l.Description = $d; $l.Save() } } }"
+    ) % (DESCRIPTION.replace("'", "''"), target.replace("'", "''"))
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], timeout=60,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=0x08000000)       # CREATE_NO_WINDOW
+    except Exception:
+        pass

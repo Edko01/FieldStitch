@@ -44,5 +44,7 @@ if __name__ == "__main__":
         if not no_window:
             appwindow.open_window(running)
         sys.exit(0)
+    import threading
+    threading.Thread(target=appwindow.refresh_shortcuts, daemon=True).start()
     from planesite.server import serve
     serve(open_browser=not no_window)

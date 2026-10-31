@@ -1,4 +1,4 @@
-"""PlaneSite - fast offline orthomosaic generation from drone photos."""
+"""PlaneSite - drone mapping and spray mission planning."""
 __version__ = "2.0.0"
 APP_NAME = "PlaneSite"
 UPDATE_REPO = "EdkoLLC/PlaneSite"   # GitHub repo that hosts updates/latest.json

@@ -1,4 +1,4 @@
-PLANESITE 1.6  -  offline orthomosaics from drone photos
+PLANESITE 2.0  -  drone mapping and spray mission planning
 =========================================================
 
 PlaneSite was called FieldStitch before version 1.6. Installing it
