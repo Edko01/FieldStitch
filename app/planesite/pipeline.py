@@ -17,7 +17,7 @@ import numpy as np
 for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
-from . import __version__
+from . import __version__, layout
 from .exif import camera_key
 from .geo import Geo, utm_epsg, rot_from_ypr
 from .sysinfo import worker_count, total_ram_bytes
@@ -118,8 +118,9 @@ class Timer:
 
 class Progress:
     def __init__(self, project_dir):
-        self.path = os.path.join(project_dir, "progress.json")
-        self.log_path = os.path.join(project_dir, "log.txt")
+        os.makedirs(layout.data_dir(project_dir), exist_ok=True)
+        self.path = layout.progress_file(project_dir)
+        self.log_path = layout.log_file(project_dir)
         self.t0 = time.time()
         self.stage = ""
         self.last_write = 0
@@ -198,6 +199,9 @@ def replace_retry(tmp, path, tries=40):
 
 
 def save_json(path, obj):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=1)
@@ -263,10 +267,10 @@ def _run(project_dir, prog):
     settings = dict(DEFAULT_SETTINGS)
     settings.update(proj.get("settings") or {})
     preset = PRESETS[settings["preset"]]
-    work = os.path.join(project_dir, "work")
+    work = layout.work_dir(project_dir)
     feat_dir = os.path.join(work, "features")
     thumb_dir = os.path.join(work, "thumbs")
-    out_dir = os.path.join(project_dir, "outputs")
+    out_dir = layout.processing_dir(project_dir)
     for d in (work, feat_dir, thumb_dir, out_dir):
         os.makedirs(d, exist_ok=True)
     t_start = time.time()

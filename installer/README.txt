@@ -75,19 +75,25 @@ Projects   The grid button at the top left lists your projects with a
            saved (Documents\PlaneSite Projects by default).
 
 
-OUTPUT FILES  (in the project's "outputs" folder)
--------------------------------------------------
-  <name>_orthomosaic.tif   the full mosaic, GeoTIFF, WGS84 / UTM zone, tiled
-  <name>_orthomosaic.tif.ovr  its overviews (zoomed-out levels). Keep the two
-                           files together: QGIS, ArcGIS, Global Mapper, SMS
-                           etc. use the .ovr automatically to open fast. For a
-                           single self-contained file, use Export > Whole
-                           orthomosaic.
-  <name>_surface.tif       coarse elevation surface used for the mosaic
-  report.json              processing statistics
-  preview.png              small preview image
-Area exports go to the project's "exports" folder unless you choose
-another one.
+PROJECT FOLDER
+--------------
+  exports\                Everything you export, one folder per kind:
+    GeoTIFF\              orthomosaic or per-area GeoTIFFs
+    XAG tiles\<map>\      web-map tiles for the XAG One app
+    Boundaries\<program>\ field boundaries for DJI Pilot 2, DJI Agras,
+                           XAG, Ceres and other software
+    Pilot 2\              mapping missions sent to Pilot 2
+  PlaneSite data\         PlaneSite's own files. No need to open it:
+    processing\           the processing result shown on the map
+                           (orthomosaic and its overviews, elevation
+                           surface, report, preview)
+    work\                 temporary processing files
+    basemap\              cached satellite imagery
+  project.json             the project itself
+
+Projects made before 2.0 had "outputs", "work" and "basemap" directly in
+the project folder; PlaneSite moves them into "PlaneSite data" the first
+time the project is opened.
 
 
 GETTING THE BEST RESULT

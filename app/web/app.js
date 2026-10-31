@@ -2095,7 +2095,7 @@ function wire() {
   $("btnLog").onclick = () => ($("logDrawer").hidden ? showLog() : ($("logDrawer").hidden = true));
   $("btnLog2").onclick = showLog;
   $("logClose").onclick = () => ($("logDrawer").hidden = true);
-  $("btnOutputs").onclick = () => api("/api/open_path", { path: result && result.outputs_dir });
+  $("btnOutputs").onclick = () => api("/api/open_path", { path: lastProjectDir && lastProjectDir + sep() + "exports", make: true });
 
   // layers
   $("btnFit").onclick = fitJob;

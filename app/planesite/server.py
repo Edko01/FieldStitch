@@ -14,7 +14,7 @@ from urllib.parse import urlparse, parse_qs
 
 import numpy as np
 
-from . import __version__, project as P, updater
+from . import __version__, layout as L, project as P, updater
 from .pipeline import load_project, save_json, safe_name
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,7 +98,7 @@ class State:
 
     # ------------------------------------------------------------ paths & origin
     def outputs(self):
-        return os.path.join(self.dir, "outputs")
+        return L.processing_dir(self.dir)
 
     def report(self):
         if self.proj and self.proj.get("geotiff"):
@@ -244,8 +244,8 @@ def recent_projects():
         except Exception:
             pass
         out.append({"dir": d, "name": name, "modified": os.path.getmtime(pf), "planned": planned,
-                    "has_result": os.path.exists(os.path.join(d, "outputs", "report.json")),
-                    "has_thumb": os.path.exists(os.path.join(d, "outputs", "preview.png"))})
+                    "has_result": os.path.exists(os.path.join(L.processing_dir(d), "report.json")),
+                    "has_thumb": os.path.exists(os.path.join(L.processing_dir(d), "preview.png"))})
     return out
 
 
@@ -256,6 +256,11 @@ def open_project(d):
     with S.lock:
         if S.running():
             raise ApiError("Processing is running. Cancel it before switching projects.")
+        # 2.0 keeps PlaneSite's own files in "PlaneSite data" so the project folder shows "exports"
+        # first; an older project is moved over the first time it's opened (renames, instant)
+        moved = L.migrate(d)
+        if moved:
+            print("Moved %s into '%s' in %s" % (", ".join(moved), L.DATA, d))
         S.dir = d
         S.proj = P.load(d)
         S.origin = None
@@ -395,7 +400,7 @@ def cached_feature_count(preset_name):
     from .pipeline import PRESETS
     pr = PRESETS.get(preset_name, PRESETS["balanced"])
     key = "r%d_n%d" % (pr["reduce"], pr["nfeat"])
-    kp = os.path.join(S.dir, "work", "features", "key.json")
+    kp = os.path.join(L.work_dir(S.dir), "features", "key.json")
     try:
         with open(kp) as f:
             old = json.load(f)
@@ -496,9 +501,10 @@ def start_processing(settings):
             raise ApiError("Add photos first.")
         S.proj["settings"].update(settings or {})
         S.save()
-        prog = os.path.join(S.dir, "progress.json")
+        os.makedirs(L.data_dir(S.dir), exist_ok=True)
+        prog = L.progress_file(S.dir)
         save_json(prog, {"status": "starting", "stage": "", "overall": 0, "message": "Starting", "elapsed": 0})
-        logf = open(os.path.join(S.dir, "process_console.txt"), "w")
+        logf = open(L.console_file(S.dir), "w")
         # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS: the workers inherit below-normal priority,
         # so they still get every idle core but the desktop and the PlaneSite window come first
         flags = (0x08000000 | 0x00004000) if IS_WIN else 0
@@ -530,7 +536,7 @@ def cancel_processing():
             S.proc.wait(10)
         except Exception:
             pass
-        p = os.path.join(S.dir, "progress.json")
+        p = L.progress_file(S.dir)
         try:
             st = json.load(open(p))
         except Exception:
@@ -542,7 +548,7 @@ def cancel_processing():
 def progress_state():
     if not S.dir:
         return None
-    p = os.path.join(S.dir, "progress.json")
+    p = L.progress_file(S.dir)
     try:
         with open(p, "r") as f:
             st = json.load(f)
@@ -556,7 +562,7 @@ def progress_state():
 
 # --------------------------------------------------------------------- areas
 def areas_path():
-    return os.path.join(S.dir, "areas.json")
+    return L.areas_file(S.dir)
 
 
 def load_areas():
@@ -626,7 +632,7 @@ _FIELDS_CACHE = {}
 def _project_fields(d):
     """Fields (not obstacles) of the project in folder d, with their obstacles, in lon/lat."""
     try:
-        key = (os.path.getmtime(P.project_file(d)), os.path.getmtime(os.path.join(d, "areas.json")))
+        key = (os.path.getmtime(P.project_file(d)), os.path.getmtime(L.areas_file(d)))
     except OSError:
         key = None
     hit = _FIELDS_CACHE.get(d)
@@ -644,7 +650,7 @@ def _project_fields_read(d):
     try:
         with open(P.project_file(d), "r", encoding="utf-8") as f:
             proj = json.load(f)
-        with open(os.path.join(d, "areas.json"), "r", encoding="utf-8") as f:
+        with open(L.areas_file(d), "r", encoding="utf-8") as f:
             areas = json.load(f)
     except Exception:
         return None, []
@@ -680,10 +686,10 @@ def field_library():
         pass
     out = []
     for d in dirs:
-        if not os.path.isfile(os.path.join(d, "areas.json")):
+        if not os.path.isfile(L.areas_file(d)):
             continue
         proj, flds = _project_fields(d)
-        mt = os.path.getmtime(os.path.join(d, "areas.json"))
+        mt = os.path.getmtime(L.areas_file(d))
         for f in flds:
             if f["area"].get("kind") == "grid":
                 continue      # tiles of an ortho, not fields
@@ -892,8 +898,7 @@ def save_diagnostics():
     info = {"version": __version__, "settings": S.proj.get("settings"), "photos": summary,
             "progress": progress_state(), "system": describe(S.dir, S.proj.get("folders") or [])}
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        for name in ("log.txt", "process_console.txt"):
-            fp = os.path.join(S.dir, name)
+        for name, fp in (("log.txt", L.log_file(S.dir)), ("process_console.txt", L.console_file(S.dir))):
             if os.path.exists(fp):
                 z.write(fp, name)
         try:      # the app's own log (window freezes, server errors), last part only
@@ -976,7 +981,7 @@ def basemap_prefetch():
     cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
     half = max(1000.0, 0.75 * max(max(xs) - min(xs), max(ys) - min(ys)))
     box = (cx - half, cy - half, cx + half, cy + half)
-    return {"blocks": basemap.prefetch(os.path.join(S.dir, "basemap"), S.origin, R0, box)}
+    return {"blocks": basemap.prefetch(L.basemap_dir(S.dir), S.origin, R0, box)}
 
 
 # ------------------------------------------------------------------- publish map tiles
@@ -1082,7 +1087,7 @@ BND_DIRS = {"generic": "Other software", "dji_mapping": "DJI Pilot 2", "dji_agra
 
 
 def export_dir(*parts):
-    return os.path.join(S.dir, "exports", *parts)
+    return L.exports_dir(S.dir, *parts)
 
 
 def xyz_maps():
@@ -1468,7 +1473,7 @@ class Handler(BaseHTTPRequestHandler):
                 from . import basemap
                 res = None
                 if S.dir and S.origin:
-                    res = basemap.tile(os.path.join(S.dir, "basemap"), int(m.group(1)), int(m.group(2)),
+                    res = basemap.tile(L.basemap_dir(S.dir), int(m.group(1)), int(m.group(2)),
                                        int(m.group(3)), S.origin, R0)
                 if res == basemap.ERROR:          # couldn't reach the image service: the window retries
                     return self._send(503, b"", "text/plain", {"Cache-Control": "no-store"})
@@ -1478,7 +1483,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/thumb":
                 d = (q.get("dir") or [""])[0]
                 ok = any(os.path.normcase(d) == os.path.normcase(r) for r in S.cfg.get("recent", []))
-                p = os.path.join(d, "outputs", "preview.png")
+                p = os.path.join(L.processing_dir(d), "preview.png")
                 if ok and os.path.exists(p):
                     with open(p, "rb") as f:
                         return self._send(200, f.read(), "image/png")
@@ -1560,7 +1565,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/photos":
             return photo_points()
         if path == "/api/log":
-            p = os.path.join(S.dir, "log.txt")
+            p = L.log_file(S.dir)
             if not os.path.exists(p):
                 return {"lines": []}
             with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -1614,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
             print("window: %s" % msg)
             if S.dir and S.running():
                 try:
-                    with open(os.path.join(S.dir, "log.txt"), "a", encoding="utf-8") as f:
+                    with open(L.log_file(S.dir), "a", encoding="utf-8") as f:
                         f.write("[%s] window: %s\n" % (time.strftime("%H:%M:%S"), msg[:500]))
                 except OSError:
                     pass
