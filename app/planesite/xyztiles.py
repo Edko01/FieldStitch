@@ -281,7 +281,7 @@ def _grid_count(o, z):
             (int(math.floor((WM - y0) / size)) - int(math.floor((WM - y1) / size)) + 1))
 
 
-def github_notes(nbytes):
+def github_notes(nbytes, publishing=False):
     """What to tell the user about putting this many bytes on GitHub."""
     notes = []
     if nbytes > GITHUB_HARD:
@@ -289,7 +289,6 @@ def github_notes(nbytes):
                      "top zoom level, or splitting the map.")
     elif nbytes > GITHUB_SOFT:
         notes.append("Over 1 GB: GitHub recommends keeping repositories under 1 GB (and strongly under 5 GB).")
-    if nbytes > GITHUB_PUSH:
-        notes.append("GitHub refuses a single push over 2 GB, so push this map in several parts, for example "
-                     "one or two zoom folders per commit and push.")
+    if nbytes > GITHUB_PUSH and not publishing:          # Publish splits the upload by itself
+        notes.append("Over 2 GB: Publish to GitHub uploads it in several parts by itself.")
     return notes

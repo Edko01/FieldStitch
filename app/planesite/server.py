@@ -827,7 +827,7 @@ def pilot2_send(b):
     from . import pilot2
     area, s, ring_ll, est, notes, name = _pilot2_area(b)
     kmz = pilot2.build_kmz(ring_ll, s)
-    out_dir = os.path.join(S.dir, "exports", "Pilot 2")
+    out_dir = export_dir("Pilot 2")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, name + ".kmz")
     with open(path, "wb") as f:
@@ -1004,23 +1004,33 @@ def publish_status(b):
     return out
 
 
+def _pub_folder(b):
+    """The tile folder to publish: one of this project's XAG tile maps, by name."""
+    from . import xyztiles
+    if not S.dir:
+        raise ApiError("Open the project first.")
+    m = xyztiles.repo_name(b.get("map") or "")
+    folder = export_dir("XAG tiles", m)
+    if not b.get("map") or not os.path.isdir(folder):
+        raise ApiError("Make the XAG tiles for this project first.")
+    return folder
+
+
 def publish_check(b):
     from . import publish, xyztiles
     d = _dest(b)
-    folder = (b.get("folder") or "").strip()
-    if not os.path.isdir(folder):
-        raise ApiError("Tile folder not found: %s" % folder)
+    folder = _pub_folder(b)
     target = (b.get("target") or "").strip()
     if not target:
         raise ApiError("Choose where to publish.")
     name = xyztiles.repo_name(b.get("name") or os.path.basename(folder))
     summ = publish.folder_summary(folder)
     if not summ["tiles"]:
-        raise ApiError("There are no tiles in %s. Make the XAG tiles first." % folder)
+        raise ApiError("There are no tiles in this map yet. Make the XAG tiles first.")
     out = _pub(d.check, target, name, folder)
     out.update(summ)
     out.update({"name": name, "url": d.tile_url(target, name),
-                "notes": xyztiles.github_notes(summ["bytes"]) if d.id == "github" else []})
+                "notes": xyztiles.github_notes(summ["bytes"], publishing=True) if d.id == "github" else []})
     return out
 
 
@@ -1029,7 +1039,7 @@ def publish_start(b):
     if S.publish and S.publish.get("running"):
         raise ApiError("A publish is already running.")
     d = _dest(b)
-    folder = (b.get("folder") or "").strip()
+    folder = _pub_folder(b)
     target = (b.get("target") or "").strip()
     name = xyztiles.repo_name(b.get("name") or os.path.basename(folder))
     mode = b.get("mode") or "new"
@@ -1064,6 +1074,30 @@ def publish_start(b):
 
 # ------------------------------------------------------------------- XAG / XYZ map tiles
 _XYZ_PLAN = {}
+
+# Every export goes to a fixed folder inside the project, so it's always easy to find:
+#   <project>/exports/GeoTIFF, /Boundaries/<software>, /XAG tiles/<map>, /Pilot 2
+BND_DIRS = {"generic": "Other software", "dji_mapping": "DJI Pilot 2", "dji_agras": "DJI Agras",
+            "xag": "XAG", "ceres": "Ceres"}
+
+
+def export_dir(*parts):
+    return os.path.join(S.dir, "exports", *parts)
+
+
+def xyz_maps():
+    """Tile maps made for this project: [{"name", "folder", "zooms"}], newest first."""
+    root = export_dir("XAG tiles")
+    out = []
+    if os.path.isdir(root):
+        for n in os.listdir(root):
+            p = os.path.join(root, n)
+            if os.path.isdir(p):
+                zs = sorted(int(z) for z in os.listdir(p) if z.isdigit() and os.path.isdir(os.path.join(p, z)))
+                if zs:
+                    out.append({"name": n, "folder": p, "zooms": [zs[0], zs[-1]], "mtime": os.path.getmtime(p)})
+    out.sort(key=lambda m: -m["mtime"])
+    return out
 
 
 def _xyz_plan(zmin, zmax):
@@ -1115,9 +1149,9 @@ def xyz_settings():
     # (not the account typed in the tiles window before 2.0: that was often the old Edko01)
     owner = ((S.cfg.get("publish") or {}).get("github") or {}).get("target") or "EdkoLLC"
     return {"name": xyztiles.repo_name(S.proj["name"]), "owner": owner,
-            "parent": last.get("parent") or os.path.join(S.dir, "exports", "XAG tiles"),
+            "parent": export_dir("XAG tiles"),
             "zmin": int(last.get("zmin", 14)), "zmax": int(last.get("zmax", 20)), "full_zoom": full,
-            "tile": int(last.get("tile", xyztiles.TILE)),
+            "tile": int(last.get("tile", xyztiles.TILE)), "maps": xyz_maps(),
             "m_px_z0": 156543.034 * math.cos(math.radians(lat)),
             "gsd_cm": rep.get("gsd_cm")}
 
@@ -1130,7 +1164,7 @@ def xyz_check(b):
     zmin, zmax = _xyz_zooms(b)
     _, counts = _xyz_plan(zmin, zmax)
     name = xyztiles.repo_name(b.get("name") or S.proj["name"])
-    root = os.path.join(b.get("parent") or "", name) if b.get("parent") else ""
+    root = export_dir("XAG tiles", name)
     old = [n for n in os.listdir(root) if n.isdigit()] if root and os.path.isdir(root) else []
     return {"name": name, "counts": counts, "total": sum(counts.values()), "folder": root,
             "existing_zooms": sorted(int(n) for n in old), "git": bool(root) and os.path.isdir(os.path.join(root, ".git")),
@@ -1144,9 +1178,7 @@ def xyz_start(b):
     if S.export and not S.export.get("finished"):
         raise ApiError("An export is already running.")
     zmin, zmax = _xyz_zooms(b)
-    parent = (b.get("parent") or "").strip()
-    if not parent:
-        raise ApiError("Choose where to save the tiles.")
+    parent = export_dir("XAG tiles")
     name = xyztiles.repo_name(b.get("name") or S.proj["name"])
     owner = (b.get("owner") or "").strip()
     root = os.path.join(parent, name)
@@ -1556,7 +1588,7 @@ class Handler(BaseHTTPRequestHandler):
                     "cams": [[round(c[0] - e0, 2), round(c[1] - n0, 2)] for c in cams],
                     "mtime": os.path.getmtime(op), "r0": R0}
         if path == "/api/areas/outlines/settings":
-            return {"last": S.cfg.get("outlines") or {}, "default_dir": os.path.join(S.dir, "exports", "Boundaries")}
+            return {"last": S.cfg.get("outlines") or {}, "dirs": {k: export_dir("Boundaries", v) for k, v in BND_DIRS.items()}}
         if path == "/api/areas":
             return {"areas": areas_for_client(load_areas())}
         if path == "/api/estimate":
@@ -1695,6 +1727,8 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         if path == "/api/open_path":
             p = b.get("path") or (S.dir if S.dir else "")
+            if p and b.get("make") and S.dir and os.path.normpath(p).startswith(os.path.normpath(S.dir)):
+                os.makedirs(p, exist_ok=True)
             if p and os.path.exists(p):
                 open_in_explorer(p)
             return {}
@@ -1797,8 +1831,8 @@ class Handler(BaseHTTPRequestHandler):
             ids = set(b.get("ids") or [])
             if not ids:
                 raise ApiError("Choose at least one field.")
-            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
-            S.cfg["outlines"] = {k: b.get(k) for k in ("target", "format", "per_field", "obstacles", "spray", "out_dir")}
+            out_dir = export_dir("Boundaries", BND_DIRS.get(b.get("target") or "generic", "Other software"))
+            S.cfg["outlines"] = {k: b.get(k) for k in ("target", "format", "per_field", "obstacles", "spray")}
             S.save_cfg()
             try:
                 files = export_outlines(load_areas(), ids, S.origin[0], out_dir, b.get("target") or "generic",
@@ -1811,7 +1845,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/areas/kml":
             from .export import areas_to_kml
             areas = [a for a in load_areas() if not b.get("ids") or a["id"] in b["ids"]]
-            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
+            out_dir = export_dir("Boundaries", "Other software")
             os.makedirs(out_dir, exist_ok=True)
             p = os.path.join(out_dir, "%s_areas.kml" % safe_name(S.proj["name"]))
             with open(p, "w", encoding="utf-8") as f:
@@ -1831,7 +1865,7 @@ class Handler(BaseHTTPRequestHandler):
             scale = float(b.get("scale") or 1.0)
             if not 0.05 <= scale <= 1.0:
                 raise ApiError("Scale must be between 5 and 100%.")
-            out_dir = b.get("out_dir") or os.path.join(S.dir, "exports")
+            out_dir = export_dir("GeoTIFF")
             S.export = {"done": 0, "total": len(ids) + (1 if whole else 0), "current": "", "frac": 0,
                         "files": [], "errors": [], "out_dir": out_dir, "finished": False}
             threading.Thread(target=export_worker,

@@ -197,6 +197,7 @@
         <button class="startbtn" id="exPublish"><svg><use href="#i-export"/></svg><span><b>Publish map tiles…</b><small>Put a tile folder on GitHub so XAG One can load it</small></span></button>
         <button class="startbtn" id="exBounds"><svg><use href="#i-areas"/></svg><span><b>Field boundaries…</b><small>For DJI Pilot 2, DJI Agras, XAG, Ceres and other software</small></span></button>
       </div>
+      <p class="hint small exfolder">Exports are saved in the project's <b>exports</b> folder. <button type="button" class="linkish" id="exOpenFolder">Open it</button></p>
     </section>
   </aside>
 
@@ -391,9 +392,7 @@
       <label><input type="radio" name="expscale" value="0.25"><span id="sc25">25%</span></label>
     </fieldset>
     <label class="check"><input type="checkbox" id="expOverviews" checked> Include overviews <small class="muted">(faster viewing in GIS and farm software)</small></label>
-    <label>Save to
-      <span class="pathrow"><input id="exportDir"><button type="button" class="ghost" id="exportBrowse">Browse…</button></span>
-    </label>
+    <p class="hint small">Saved in the project's <b>exports › GeoTIFF</b> folder.</p>
     <p class="expest" id="expEst"></p>
     <p class="form-error" id="exportErr" role="alert"></p>
     <div class="btnrow end">
@@ -444,9 +443,7 @@
       <label>Spray height (ft)<input type="number" id="bndHeight" step="1" min="3" max="100" value="15"></label>
       <label>Spray width (ft)<input type="number" id="bndWidth" step="0.5" min="3" max="80" value="18"></label>
     </div>
-    <label>Save to
-      <span class="pathrow"><input id="bndDir"><button type="button" class="ghost" id="bndBrowse">Browse…</button></span>
-    </label>
+    <p class="hint small" id="bndWhere"></p>
     <p class="form-error" id="bndErr" role="alert"></p>
     <p class="p2ok" id="bndOk" role="status" hidden></p>
     <div class="btnrow end">
@@ -468,9 +465,6 @@
       <label title="512 px tiles hold twice the detail in each direction, so the map stays sharp when XAG One zooms in past the last level. They take about 4 times the space.">Tile size<select id="xyzTile"><option value="256">256 px</option><option value="512">512 px (sharper)</option></select></label>
     </div>
     <p class="hint small" id="xyzZoomNote"></p>
-    <label>Save in
-      <span class="pathrow"><input id="xyzParent" spellcheck="false"><button type="button" class="ghost" id="xyzBrowse">Browse…</button></span>
-    </label>
     <div class="xyzinfo">
       <div><small>Folder</small><b id="xyzFolder">–</b></div>
       <div><small>Tile address once published</small><code id="xyzUrl">–</code></div>
@@ -528,9 +522,7 @@
       </div>
       <p class="hint small" id="pubTargetNote"></p>
       <p class="hint small" id="pubInstall" hidden>Organisation not listed? PlaneSite isn't installed there yet. Send this link to an owner of the organisation: <code id="pubInstallUrl"></code> <button type="button" class="linkish" id="pubInstallCopy">Copy link</button></p>
-      <label>Tile folder
-        <span class="pathrow"><input id="pubFolder" spellcheck="false"><button type="button" class="ghost" id="pubBrowse">Browse…</button></span>
-      </label>
+      <label>Map<select id="pubMap"></select></label>
       <div class="xyzinfo">
         <div><small>Tiles</small><b id="pubTiles">–</b></div>
         <div><small>Tile address for XAG One</small><code id="pubUrl">–</code></div>

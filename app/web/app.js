@@ -155,7 +155,6 @@ function render() {
       $("dash").hidden = true;
       loadPhotos(true);
       loadResult(true);
-      $("exportDir").value = p.dir + sep() + "exports";
       // a job planned before flying opens on its fields; a flown one on its photos or result
       setPanel(p.has_result ? "layers" : status.running ? "process" : (!p.count && p.has_frame) ? "areas" : "import");
     } else {
@@ -1460,13 +1459,14 @@ const BND_HOW = {
   generic: "Boundaries and obstacles as separate shapes tagged BOUNDARY and OBSTACLE, as Pix4Dfields writes them.",
 };
 const BND_OBS = { dji_mapping: false, ceres: false };
-const bnd = { dir: "" };
+const bnd = { dir: "", dirs: {} };
+const BND_FOLDER = { generic: "Other software", dji_mapping: "DJI Pilot 2", dji_agras: "DJI Agras", xag: "XAG", ceres: "Ceres" };
 const bndTarget = () => document.querySelector("input[name=bndtarget]:checked").value;
 async function openOutlines() {
   setErr("bndErr", "");
   $("bndOk").hidden = true;
   $("bndOpen").hidden = true;
-  let st = { last: {}, default_dir: "" };
+  let st = { last: {}, dirs: {} };
   try { st = await api("/api/areas/outlines/settings"); } catch (e) { /* defaults */ }
   const last = st.last || {};
   const t = last.target && document.querySelector('input[name=bndtarget][value="' + last.target + '"]');
@@ -1479,7 +1479,7 @@ async function openOutlines() {
   if (sp.rate_gal_ac != null) $("bndRate").value = sp.rate_gal_ac;
   if (sp.height_ft != null) $("bndHeight").value = sp.height_ft;
   if (sp.width_ft != null) $("bndWidth").value = sp.width_ft;
-  $("bndDir").value = last.out_dir || st.default_dir || "";
+  bnd.dirs = st.dirs || {};
   const ul = $("bndList");
   ul.innerHTML = "";
   const focus = document.querySelector("#areaList li.focus");
@@ -1505,6 +1505,8 @@ async function openOutlines() {
 function syncOutlines() {
   const t = bndTarget();
   $("bndHow").textContent = BND_HOW[t];
+  $("bndWhere").innerHTML = "";
+  $("bndWhere").append("Saved in the project's ", Object.assign(document.createElement("b"), { textContent: "exports › Boundaries › " + BND_FOLDER[t] }), " folder.");
   $("bndGeneric").hidden = t !== "generic";
   $("bndSpray").hidden = t !== "dji_agras";
   const obsOk = BND_OBS[t] !== false;
@@ -1529,7 +1531,6 @@ async function runOutlines() {
     format: document.querySelector("input[name=bndfmt]:checked").value,
     per_field: $("bndPerField").checked,
     obstacles: $("bndObs").checked && BND_OBS[t] !== false,
-    out_dir: $("bndDir").value.trim(),
   };
   body.spray = { rate_gal_ac: +$("bndRate").value, height_ft: +$("bndHeight").value, width_ft: +$("bndWidth").value };
   if (t === "dji_agras" && (!(body.spray.width_ft > 0) || !(body.spray.height_ft > 0)))
@@ -1592,7 +1593,6 @@ function readExport() {
     compression: (document.querySelector("input[name=expcomp]:checked") || {}).value || "jpeg",
     scale: parseFloat((document.querySelector("input[name=expscale]:checked") || {}).value || "1"),
     overviews: $("expOverviews").checked,
-    out_dir: $("exportDir").value.trim(),
   };
 }
 let expTimer = null;
@@ -1655,7 +1655,6 @@ async function openXyz() {
   try { st = await api("/api/xyz/settings"); } catch (e) { return toast(e.message); }
   $("xyzName").value = st.name;
   xyz.owner = st.owner;
-  $("xyzParent").value = st.parent;
   $("xyzZmin").value = st.zmin;
   $("xyzZmax").value = st.zmax;
   $("xyzTile").value = String(st.tile || 256);
@@ -1665,7 +1664,7 @@ async function openXyz() {
   if (!$("xyzDlg").open) $("xyzDlg").showModal();
   xyzCheck();
 }
-const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: xyz.owner || "", parent: $("xyzParent").value.trim(),
+const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: xyz.owner || "",
                          zmin: +$("xyzZmin").value, zmax: +$("xyzZmax").value,
                          tile: +$("xyzTile").value || 256 });
 function xyzCheckSoon() { clearTimeout(xyz.timer); xyz.timer = setTimeout(xyzCheck, 350); }
@@ -1685,7 +1684,7 @@ async function xyzCheck() {
     const r = await api("/api/xyz/check", b);
     if (seq !== xyz.seq) return;
     setErr("xyzErr", "");
-    xyz.folder = r.folder; xyz.url = r.url;
+    xyz.folder = r.folder; xyz.url = r.url; xyz.name = r.name;
     $("xyzFolder").textContent = r.folder || "–";
     $("xyzUrl").textContent = r.url;
     const zs = Object.keys(r.counts).map(Number);
@@ -1738,16 +1737,24 @@ function xyzFinished(ex) {
 // ------------------------------------------------------------------ publish map tiles
 // GitHub now; the destination is a parameter so Cloudflare R2 can be added later.
 const pub = { dest: "github", timer: 0, checkT: 0, check: null, targets: null, seq: 0, lastJob: null };
-async function openPublish(folder, name) {
+async function openPublish(map) {
   setErr("pubErr", "");
   ["pubExists", "pubDone", "pubNotes", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
-  if (folder) $("pubFolder").value = folder;
-  if (name) $("pubName").value = name;
-  if (!$("pubFolder").value) {
-    try { const st = await api("/api/xyz/settings"); $("pubFolder").value = st.parent + sep() + st.name; $("pubName").value = st.name; }
-    catch (e) { /* no project: the user picks the folder */ }
+  // the maps made for this project (exports › XAG tiles); nothing to browse for
+  let maps = [];
+  try { maps = (await api("/api/xyz/settings")).maps || []; } catch (e) { /* no project or no ortho */ }
+  const sel = $("pubMap");
+  const keep = map || sel.value;
+  sel.innerHTML = "";
+  for (const m of maps) {
+    const o = document.createElement("option");
+    o.value = m.name;
+    o.textContent = m.name + " (zoom " + m.zooms[0] + "–" + m.zooms[1] + ")";
+    sel.append(o);
   }
-  if (!$("pubName").value && $("pubFolder").value) $("pubName").value = $("pubFolder").value.split(/[\\/]/).pop();
+  sel.value = maps.some((m) => m.name === keep) ? keep : maps.length ? maps[0].name : "";
+  $("pubName").value = sel.value;
+  if (!maps.length) setErr("pubErr", "No XAG tiles in this project yet. Make them first: Export › XAG map tiles.");
   if (!$("pubDlg").open) $("pubDlg").showModal();
   pub.targets = null;
   await pubStatus();
@@ -1806,8 +1813,8 @@ async function pubCheck() {
   const seq = ++pub.seq;
   pub.check = null;
   $("pubExists").hidden = true;
-  const b = { dest: pub.dest, target: $("pubTarget").value, name: $("pubName").value.trim(), folder: $("pubFolder").value.trim() };
-  if (!b.target || !b.folder) return;
+  const b = { dest: pub.dest, target: $("pubTarget").value, name: $("pubName").value.trim(), map: $("pubMap").value };
+  if (!b.target || !b.map) return;
   try {
     const r = await api("/api/publish/check", b, 30000);
     if (seq !== pub.seq) return;
@@ -1839,7 +1846,7 @@ async function pubStart(mode) {
   ["pubDone", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
   try {
     await api("/api/publish/start", { dest: pub.dest, target: $("pubTarget").value, name: $("pubName").value.trim(),
-                                      folder: $("pubFolder").value.trim(), mode });
+                                      map: $("pubMap").value, mode });
     pubStatus();
   } catch (e) { setErr("pubErr", e.message); }
 }
@@ -1848,7 +1855,7 @@ function pubJob(j) {
   const running = !!(j && j.running);
   $("pubStop").hidden = !running;
   $("pubGo").disabled = running || !pub.ready || !$("pubTarget").value;
-  ["pubTarget", "pubName", "pubFolder", "pubBrowse"].forEach((id) => ($(id).disabled = running));
+  ["pubTarget", "pubName", "pubMap"].forEach((id) => ($(id).disabled = running));
   $("pubBarWrap").hidden = !running;
   if (!j) { $("pubProg").textContent = ""; return; }
   if (running) {
@@ -1975,16 +1982,15 @@ function wire() {
   $("exGeotiff").onclick = () => openExport(false);
   $("exXag").onclick = openXyz;
   $("exBounds").onclick = openOutlines;
-  ["xyzName", "xyzParent", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
+  ["xyzName", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
   $("xyzTile").onchange = xyzCheckSoon;
-  $("xyzBrowse").onclick = async () => { const p = await browse("folder", "Save the map's tile folder in", $("xyzParent").value); if (p) { $("xyzParent").value = p; xyzCheck(); } };
   $("xyzOpen").onclick = () => api("/api/open_path", { path: xyz.folder });
   $("xyzCopy").onclick = async () => {
     try { await navigator.clipboard.writeText(xyz.url); toast("Tile address copied."); }
     catch (e) { toast("Couldn't copy. Select the address in the window and copy it."); }
   };
   $("xyzForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); xyzStart(); } };
-  $("xyzPublish").onclick = () => { $("xyzDlg").close(); openPublish(xyz.folder, $("xyzName").value.trim()); };
+  $("xyzPublish").onclick = () => { $("xyzDlg").close(); openPublish(xyz.name || $("xyzName").value.trim()); };
   $("exPublish").onclick = () => openPublish();
   $("pubSignin").onclick = async () => {
     setErr("pubErr", "");
@@ -2005,8 +2011,7 @@ function wire() {
   };
   $("pubTarget").onchange = () => { pubTargetNote(); pubCheckSoon(); };
   $("pubName").oninput = pubCheckSoon;
-  $("pubFolder").oninput = pubCheckSoon;
-  $("pubBrowse").onclick = async () => { const p = await browse("folder", "The map's tile folder", $("pubFolder").value); if (p) { $("pubFolder").value = p; if (!$("pubName").value) $("pubName").value = p.split(/[\\/]/).pop(); pubCheckSoon(); } };
+  $("pubMap").onchange = () => { $("pubName").value = $("pubMap").value; pubCheckSoon(); };
   $("pubInstallCopy").onclick = () => copyText($("pubInstallUrl").textContent, "Install link copied.");
   $("pubExCancel").onclick = () => ($("pubExists").hidden = true);
   $("pubInto").onclick = () => pubStart("into");
@@ -2032,7 +2037,6 @@ function wire() {
     try {
       const r = await api("/api/rename", { name: v });
       lastProjectDir = r.dir;
-      if (r.moved) $("exportDir").value = r.dir + sep() + "exports";
       toast(r.moved ? "Renamed. The project folder is now " + r.dir : "Renamed.");
       refresh();
     } catch (e) { toast(e.message); nm.value = p.name; }
@@ -2173,7 +2177,6 @@ function wire() {
   };
   document.querySelectorAll("input[name=bndtarget]").forEach((r) => (r.onchange = syncOutlines));
   $("bndAll").onchange = () => { document.querySelectorAll("#bndList input").forEach((c) => (c.checked = $("bndAll").checked)); syncOutlines(); };
-  $("bndBrowse").onclick = async () => { const p = await browse("folder", "Save boundary files in", $("bndDir").value); if (p) $("bndDir").value = p; };
   $("bndOpen").onclick = () => api("/api/open_path", { path: bnd.dir });
   $("bndForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); runOutlines(); } };
 
@@ -2182,7 +2185,10 @@ function wire() {
   $("expAreasAll").onchange = () => { document.querySelectorAll("#expAreaList input").forEach((c) => (c.checked = $("expAreasAll").checked)); syncAll(); requestExportEstimate(); };
   document.querySelectorAll("input[name=expcomp], input[name=expscale]").forEach((r) => (r.onchange = requestExportEstimate));
   $("expOverviews").onchange = requestExportEstimate;
-  $("exportBrowse").onclick = async () => { const p = await browse("folder", "Save exported GeoTIFFs in", $("exportDir").value); if (p) $("exportDir").value = p; };
+  $("exOpenFolder").onclick = async () => {
+    const d = lastProjectDir && lastProjectDir + sep() + "exports";
+    try { await api("/api/open_path", { path: d, make: true }); } catch (e) { toast(e.message); }
+  };
   // send to Pilot 2
   for (const id of Object.values(p2Fields)) $(id).oninput = p2Changed;
   $("p2Auto").onchange = p2Changed;
