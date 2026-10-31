@@ -1393,7 +1393,7 @@ function p2Fill(r, first) {
   $("p2Dir").disabled = $("p2Auto").checked;
   $("p2Axis").textContent = "(" + Math.round(s.long_axis) + "°)";
   const e = r.estimates;
-  $("p2Gsd").textContent = "GSD ≈ " + fmt(e.gsd_cm / 2.54, 2) + " in (" + fmt(e.gsd_cm, 1) + " cm)";
+  $("p2Gsd").textContent = "GSD ≈ " + fmt(e.gsd_cm, 1) + " cm";       // GSD is quoted in cm, even in the US
   $("p2Est").innerHTML = "";
   const parts = [
     ["Field", fmt(e.area_ha * 2.47105, e.area_ha * 2.47105 < 10 ? 1 : 0) + " ac"],
