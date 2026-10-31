@@ -1112,7 +1112,8 @@ def xyz_settings():
     # the zoom whose tiles are as sharp as the orthomosaic itself
     full = int(math.ceil(math.log2(156543.034 * math.cos(math.radians(lat)) / gsd))) if gsd > 0 else 20
     # the account the tiles will most likely be published to: the last Publish target
-    owner = ((S.cfg.get("publish") or {}).get("github") or {}).get("target") or last.get("owner") or "EdkoLLC"
+    # (not the account typed in the tiles window before 2.0: that was often the old Edko01)
+    owner = ((S.cfg.get("publish") or {}).get("github") or {}).get("target") or "EdkoLLC"
     return {"name": xyztiles.repo_name(S.proj["name"]), "owner": owner,
             "parent": last.get("parent") or os.path.join(S.dir, "exports", "XAG tiles"),
             "zmin": int(last.get("zmin", 14)), "zmax": int(last.get("zmax", 20)), "full_zoom": full,
