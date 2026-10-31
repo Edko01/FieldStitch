@@ -1739,6 +1739,7 @@ function xyzFinished(ex) {
 const pub = { dest: "github", timer: 0, checkT: 0, check: null, targets: null, seq: 0, lastJob: null };
 async function openPublish(map) {
   setErr("pubErr", "");
+  pub.published = true; pubReset();
   ["pubExists", "pubDone", "pubNotes", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
   // the maps made for this project (exports › XAG tiles); nothing to browse for
   let maps = [];
@@ -1883,13 +1884,35 @@ function pubJob(j) {
       pub.url = r.url; pub.repo = r.repo_url;
       $("pubCopyUrl").hidden = false;
       $("pubOpenRepo").hidden = false;
-      copyText(r.url, "Tile address copied.");
+      // done: publishing again would only push the same tiles. Choosing another map, account or
+      // name brings the button back.
+      pub.published = true;
+      $("pubGo").hidden = true;
     }
   }
   pub.lastJob = j;
 }
+// Copy from a click. The selection-and-copy route doesn't make the window ask for clipboard
+// permission (navigator.clipboard can, which shows a "wants to see text copied" prompt).
+// after a finished publish the Publish button is hidden; any change (or reopening) brings it back
+function pubReset() {
+  if (!pub.published) return;
+  pub.published = false;
+  $("pubGo").hidden = false;
+  ["pubDone", "pubCopyUrl", "pubOpenRepo"].forEach((id) => ($(id).hidden = true));
+}
 async function copyText(t, ok) {
-  try { await navigator.clipboard.writeText(t); toast(ok); } catch (e) { /* the address stays on screen */ }
+  const ta = document.createElement("textarea");
+  ta.value = t;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+  (document.querySelector("dialog[open]") || document.body).append(ta);
+  ta.select();
+  let done = false;
+  try { done = document.execCommand("copy"); } catch (e) { done = false; }
+  ta.remove();
+  if (!done) { try { await navigator.clipboard.writeText(t); done = true; } catch (e) { done = false; } }
+  toast(done ? ok : "Couldn't copy. Select the address in the window and copy it.");
 }
 
 // ------------------------------------------------------------------ projects dashboard
@@ -1985,10 +2008,7 @@ function wire() {
   ["xyzName", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
   $("xyzTile").onchange = xyzCheckSoon;
   $("xyzOpen").onclick = () => api("/api/open_path", { path: xyz.folder });
-  $("xyzCopy").onclick = async () => {
-    try { await navigator.clipboard.writeText(xyz.url); toast("Tile address copied."); }
-    catch (e) { toast("Couldn't copy. Select the address in the window and copy it."); }
-  };
+  $("xyzCopy").onclick = () => copyText(xyz.url, "Tile address copied.");
   $("xyzForm").onsubmit = (e) => { if (e.submitter && e.submitter.value === "export") { e.preventDefault(); xyzStart(); } };
   $("xyzPublish").onclick = () => { $("xyzDlg").close(); openPublish(xyz.name || $("xyzName").value.trim()); };
   $("exPublish").onclick = () => openPublish();
@@ -2009,9 +2029,9 @@ function wire() {
     try { await api("/api/publish/app", { client_id: $("pubClientId").value, slug: $("pubSlug").value }); $("pubAppBox").open = false; pubStatus(); }
     catch (e) { setErr("pubErr", e.message); }
   };
-  $("pubTarget").onchange = () => { pubTargetNote(); pubCheckSoon(); };
-  $("pubName").oninput = pubCheckSoon;
-  $("pubMap").onchange = () => { $("pubName").value = $("pubMap").value; pubCheckSoon(); };
+  $("pubTarget").onchange = () => { pubTargetNote(); pubReset(); pubCheckSoon(); };
+  $("pubName").oninput = () => { pubReset(); pubCheckSoon(); };
+  $("pubMap").onchange = () => { $("pubName").value = $("pubMap").value; pubReset(); pubCheckSoon(); };
   $("pubInstallCopy").onclick = () => copyText($("pubInstallUrl").textContent, "Install link copied.");
   $("pubExCancel").onclick = () => ($("pubExists").hidden = true);
   $("pubInto").onclick = () => pubStart("into");
