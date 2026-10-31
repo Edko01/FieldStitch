@@ -1087,6 +1087,17 @@ def _xyz_zooms(b):
     return zmin, zmax
 
 
+def _xyz_tile(b):
+    from . import xyztiles
+    try:
+        ts = int(b.get("tile") or xyztiles.TILE)
+    except (TypeError, ValueError):
+        ts = 0
+    if ts not in xyztiles.TILE_SIZES:
+        raise ApiError("Tile size must be 256 or 512 pixels.")
+    return ts
+
+
 def xyz_settings():
     from . import xyztiles
     if not S.proj or not S.ortho_path():
@@ -1103,6 +1114,7 @@ def xyz_settings():
     return {"name": xyztiles.repo_name(S.proj["name"]), "owner": last.get("owner") or "EdkoLLC",
             "parent": last.get("parent") or os.path.join(S.dir, "exports", "XAG tiles"),
             "zmin": int(last.get("zmin", 14)), "zmax": int(last.get("zmax", 20)), "full_zoom": full,
+            "tile": int(last.get("tile", xyztiles.TILE)),
             "m_px_z0": 156543.034 * math.cos(math.radians(lat)),
             "gsd_cm": rep.get("gsd_cm")}
 
@@ -1135,7 +1147,8 @@ def xyz_start(b):
     name = xyztiles.repo_name(b.get("name") or S.proj["name"])
     owner = (b.get("owner") or "").strip()
     root = os.path.join(parent, name)
-    S.cfg["xyz"] = {"owner": owner, "parent": parent, "zmin": zmin, "zmax": zmax}
+    ts = _xyz_tile(b)
+    S.cfg["xyz"] = {"owner": owner, "parent": parent, "zmin": zmin, "zmax": zmax, "tile": ts}
     S.save_cfg()
     _, counts = _xyz_plan(zmin, zmax)
     S.export = {"kind": "xyz", "done": 0, "total": sum(counts.values()), "current": "XAG tiles", "frac": 0,
@@ -1147,7 +1160,7 @@ def xyz_start(b):
         try:
             def prog(done, total, z):
                 S.export.update(done=done, total=total, current="XAG tiles, zoom %d" % z)
-            r = xyztiles.export(op, root, zmin, zmax, progress=prog)
+            r = xyztiles.export(op, root, zmin, zmax, progress=prog, ts=ts)
             r["notes"] = xyztiles.github_notes(r["bytes"])
             S.export.update(summary=r, done=S.export["total"], current="", finished=True)
         except Exception as e:

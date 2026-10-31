@@ -3,8 +3,8 @@
 The XAG app loads a base map from https://raw.githubusercontent.com/<owner>/<map>/main/{z}/{x}/{y}.png,
 so one map = one GitHub repo = one folder of tiles. This writes that folder:
 
-* standard web-mercator XYZ tiles (EPSG:3857), 256 x 256, {z}/{x}/{y}.png, y counted from the top
-  (not TMS);
+* standard web-mercator XYZ tiles (EPSG:3857), 256 x 256 (or 512 x 512 for more detail when the
+  app zooms in past the last level), {z}/{x}/{y}.png, y counted from the top (not TMS);
 * PNG for every tile; outside the orthomosaic is transparent (no black fill), so edge tiles keep
   their partial transparency;
 * tiles with nothing on them are not written at all (fewer files and fewer downloads in the app).
@@ -25,6 +25,7 @@ import numpy as np
 
 WM = 20037508.342789244          # half the width of the web-mercator world, metres
 TILE = 256
+TILE_SIZES = (256, 512)          # 512: twice the detail at each level, about 4x the bytes
 PNG_LEVEL = 9                    # smallest files; the map view uses 1 for speed
 GITHUB_SOFT = 1 << 30            # GitHub recommends repositories under 1 GB
 GITHUB_PUSH = 2 << 30            # and refuses a single push over 2 GB
@@ -122,43 +123,57 @@ def _dataset(path):
     return _local.ds
 
 
-def _pixel_grid(o, z, x, y):
-    """UTM easting/northing of every tile pixel centre (256 x 256), from a coarse 17 x 17 grid of
+def _pixel_grid(o, z, x, y, n=TILE):
+    """UTM easting/northing of every tile pixel centre (n x n), from a coarse 17 x 17 grid of
     exact transforms; web mercator to UTM is smooth, so the interpolation error is far below a
     millimetre."""
     a, b, c, d = _tile_bounds(z, x, y)
-    s = (c - a) / TILE
+    s = (c - a) / n
     k = 17
-    u = np.linspace(0.5, TILE - 0.5, k)
+    u = np.linspace(0.5, n - 0.5, k)
     gx, gy = np.meshgrid(a + u * s, d - u * s)
     ce, cn = o.to_utm.transform(gx.ravel(), gy.ravel())
     ce, cn = np.asarray(ce).reshape(k, k), np.asarray(cn).reshape(k, k)
-    p = (np.arange(TILE) + 0.5 - 0.5) / ((TILE - 1) / (k - 1))
+    p = np.arange(n) / ((n - 1) / (k - 1))
     i0 = np.clip(np.floor(p).astype(int), 0, k - 2)
     t = (p - i0)[None, :]
     def up(g):
-        rows = g[:, i0] * (1 - t) + g[:, i0 + 1] * t                    # (k, 256): along x
+        rows = g[:, i0] * (1 - t) + g[:, i0 + 1] * t                    # (k, n): along x
         tt = (p - i0)[:, None]
-        return rows[i0, :] * (1 - tt) + rows[i0 + 1, :] * tt           # (256, 256)
+        return rows[i0, :] * (1 - tt) + rows[i0 + 1, :] * tt           # (n, n)
     return up(ce), up(cn)
 
 
-def render(o, z, x, y):
-    """PNG bytes of one tile, or None when nothing of the ortho is on it."""
+SUPERSAMPLE = 2                  # render tiles at 2x and shrink them: crisper than one bilinear pass
+SHARPEN = 0.5                    # light unsharp mask on tiles shrunk from finer imagery
+
+
+def render(o, z, x, y, ts=TILE):
+    """PNG bytes of one ts x ts tile, or None when nothing of the ortho is on it.
+
+    Where the ortho is finer than the tile, the tile is first drawn at twice its size from
+    imagery at that finer resolution, then shrunk with pixel-area averaging and lightly
+    sharpened. One bilinear pass straight to tile size (the old way) softens edges by about a
+    pixel, which XAG One then magnifies when it zooms in past the last level."""
     import cv2
     from rasterio.enums import Resampling
     from rasterio.windows import Window
     ds = _dataset(o.path)
-    E, N = _pixel_grid(o, z, x, y)
-    # read the window at about the tile's own resolution (overviews for the lower zooms), with a
-    # margin of two read pixels so interpolation at the tile's edge stays inside what was read
-    tile_res = (float(E.max()) - float(E.min())) / TILE
-    pad = 2 * max(o.res, tile_res)
+    E1, N1 = _pixel_grid(o, z, x, y, 9)                              # metres on the ground per tile pixel
+    tile_res = max(float(E1.max() - E1.min()), float(N1.max() - N1.min())) / (ts - ts / 9.0)
+    finer = tile_res > 1.2 * o.res                                   # the ortho has detail to spare
+    ss = SUPERSAMPLE if finer else 1
+    n = ts * ss
+    E, N = _pixel_grid(o, z, x, y, n)
+    read_res = max(o.res, tile_res / ss)
+    # read only the window under the tile, at about the resolution it is drawn at (overviews for
+    # the lower zooms), with a margin of two read pixels so interpolation stays inside the read
+    pad = 2 * max(o.res, read_res)
     e0, e1 = max(float(E.min()) - pad, o.b.left), min(float(E.max()) + pad, o.b.right)
     n0, n1 = max(float(N.min()) - pad, o.b.bottom), min(float(N.max()) + pad, o.b.top)
     if e1 <= e0 or n1 <= n0:
         return None
-    f = max(1.0, tile_res / o.res)
+    f = max(1.0, read_res / o.res)
     col0, row0 = (e0 - o.b.left) / o.res, (o.b.top - n1) / o.res
     wcols, wrows = (e1 - e0) / o.res, (n1 - n0) / o.res
     ow, oh = max(1, int(math.ceil(wcols / f))), max(1, int(math.ceil(wrows / f)))
@@ -172,8 +187,15 @@ def render(o, z, x, y):
     mx = ((E - e0) / sx - 0.5).astype(np.float32)
     my = ((n1 - N) / sy - 0.5).astype(np.float32)
     bgr = cv2.merge([rgb[2], rgb[1], rgb[0]])
-    img = cv2.remap(bgr, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    interp = cv2.INTER_LINEAR if finer else cv2.INTER_CUBIC
+    img = cv2.remap(bgr, mx, my, interp, borderMode=cv2.BORDER_REPLICATE)
     a = cv2.remap(m.astype(np.float32), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    if ss > 1:
+        img = cv2.resize(img, (ts, ts), interpolation=cv2.INTER_AREA)
+        a = cv2.resize(a, (ts, ts), interpolation=cv2.INTER_AREA)
+    if finer and SHARPEN > 0:
+        blur = cv2.GaussianBlur(img, (0, 0), 0.8)
+        img = cv2.addWeighted(img, 1 + SHARPEN, blur, -SHARPEN, 0)
     # keep only pixels made entirely of ortho pixels: the outside never bleeds in as a dark fringe
     alpha = np.where(a >= 254.5, 255, 0).astype(np.uint8)
     if not alpha.any():
@@ -207,7 +229,7 @@ def clear_zoom_folders(root):
     return n
 
 
-def export(path, root, zmin, zmax, progress=None, cancel=None, workers=None):
+def export(path, root, zmin, zmax, progress=None, cancel=None, workers=None, ts=TILE):
     """Write the tiles into root/{z}/{x}/{y}.png. Returns a summary dict."""
     o, todo = plan(path, zmin, zmax)
     jobs = [t for z in sorted(todo) for t in todo[z]]
@@ -222,7 +244,7 @@ def export(path, root, zmin, zmax, progress=None, cancel=None, workers=None):
         if cancel and cancel():
             return
         z, x, y = t
-        data = render(o, z, x, y)
+        data = render(o, z, x, y, ts)
         if data:
             d = os.path.join(root, str(z), str(x))
             with lock:

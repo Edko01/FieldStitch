@@ -1658,6 +1658,7 @@ async function openXyz() {
   $("xyzParent").value = st.parent;
   $("xyzZmin").value = st.zmin;
   $("xyzZmax").value = st.zmax;
+  $("xyzTile").value = String(st.tile || 256);
   xyz.full = st.full_zoom;
   xyz.gsd = st.gsd_cm;
   xyz.m0 = st.m_px_z0;
@@ -1665,17 +1666,19 @@ async function openXyz() {
   xyzCheck();
 }
 const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: $("xyzOwner").value.trim(), parent: $("xyzParent").value.trim(),
-                         zmin: +$("xyzZmin").value, zmax: +$("xyzZmax").value });
+                         zmin: +$("xyzZmin").value, zmax: +$("xyzZmax").value,
+                         tile: +$("xyzTile").value || 256 });
 function xyzCheckSoon() { clearTimeout(xyz.timer); xyz.timer = setTimeout(xyzCheck, 350); }
 async function xyzCheck() {
   const seq = ++xyz.seq;
   const b = xyzRead();
   const zmax = b.zmax;
-  const cm = xyz.m0 ? (xyz.m0 / 2 ** zmax) * 100 : 0;
+  const cm = xyz.m0 ? (xyz.m0 / 2 ** zmax) * 100 * (256 / (b.tile || 256)) : 0;
   $("xyzZoomNote").textContent = xyz.gsd && cm
     ? "At zoom " + zmax + " a tile pixel covers about " + fmt(cm, cm < 10 ? 1 : 0) + " cm (" + fmt(cm / 2.54, 1) + " in); the orthomosaic is " +
-      fmt(xyz.gsd, 1) + " cm. Each zoom level up has about 4 times the tiles of the one below." +
-      (zmax > xyz.full ? " Above zoom " + xyz.full + " there is no extra detail, only more files." : "")
+      fmt(xyz.gsd, 1) + " cm. Each zoom level up has about 4 times the tiles of the one below" +
+      (b.tile === 512 ? "; 512 px tiles are about 4 times the size of 256 px ones." : ".") +
+      (cm < xyz.gsd * 0.9 ? " That's finer than the orthomosaic: no extra detail, only more space." : "")
     : "";
   try {
     const r = await api("/api/xyz/check", b);
@@ -1971,7 +1974,8 @@ function wire() {
   $("exGeotiff").onclick = () => openExport(false);
   $("exXag").onclick = openXyz;
   $("exBounds").onclick = openOutlines;
-  ["xyzName", "xyzOwner", "xyzParent", "xyzZmin", "xyzZmax"].forEach((id) => ($(id).oninput = xyzCheckSoon));
+  ["xyzName", "xyzOwner", "xyzParent", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
+  $("xyzTile").onchange = xyzCheckSoon;
   $("xyzBrowse").onclick = async () => { const p = await browse("folder", "Save the map's tile folder in", $("xyzParent").value); if (p) { $("xyzParent").value = p; xyzCheck(); } };
   $("xyzOpen").onclick = () => api("/api/open_path", { path: xyz.folder });
   $("xyzCopy").onclick = async () => {
