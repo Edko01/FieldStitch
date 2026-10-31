@@ -808,6 +808,9 @@ function drawBase() {
   const p = status && status.project;
   $("mapCredit").hidden = true;
   if (!p || !p.frame) return;
+  // a job without an orthomosaic yet is planned on the satellite map: show it even if it was
+  // switched off for another job (the saved choice is left as it was)
+  if (!p.has_result && !$("lyrBase").checked) $("lyrBase").checked = true;
   layers.base = L.tileLayer("/basemap/{z}/{x}/{y}?o=" + p.frame, {
     tileSize: 256, minZoom: -4, maxZoom: 22, minNativeZoom: -4, maxNativeZoom: 7, pane: "base",
     keepBuffer: 2, updateWhenZooming: false, updateInterval: 120 });
