@@ -461,10 +461,9 @@
 <dialog class="modal wide" id="xyzDlg" aria-labelledby="xyzTitle">
   <form method="dialog" id="xyzForm">
     <header class="modalhead"><h2 id="xyzTitle">XAG map tiles</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
-    <p class="hint small">The whole orthomosaic as one folder of web-map tiles (PNG, {z}/{x}/{y}.png). Upload the folder to its own GitHub repository and the XAG One app loads it as a base map. Empty tiles are left out.</p>
+    <p class="hint small">The whole orthomosaic as one folder of web-map tiles (PNG, {z}/{x}/{y}.png). Then <b>Publish to GitHub</b> puts the folder in its own repository, where the XAG One app loads it as a base map. Empty tiles are left out.</p>
     <div class="xyzgrid">
       <label title="The name of the GitHub repository that will hold this map">Map name (GitHub repo)<input id="xyzName" autocomplete="off" spellcheck="false" maxlength="100"></label>
-      <label>GitHub account<input id="xyzOwner" autocomplete="off" spellcheck="false"></label>
       <label>From zoom<input type="number" id="xyzZmin" min="0" max="23" step="1"></label>
       <label>To zoom<input type="number" id="xyzZmax" min="0" max="23" step="1"></label>
       <label title="512 px tiles hold twice the detail in each direction, so the map stays sharp when XAG One zooms in past the last level. They take about 4 times the space.">Tile size<select id="xyzTile"><option value="256">256 px</option><option value="512">512 px (sharper)</option></select></label>
@@ -475,7 +474,7 @@
     </label>
     <div class="xyzinfo">
       <div><small>Folder</small><b id="xyzFolder">–</b></div>
-      <div><small>Tile address for XAG One</small><code id="xyzUrl">–</code></div>
+      <div><small>Tile address once published</small><code id="xyzUrl">–</code></div>
       <div><small>Tiles to make</small><b id="xyzCount">–</b></div>
     </div>
     <p class="hint small" id="xyzExisting" hidden></p>

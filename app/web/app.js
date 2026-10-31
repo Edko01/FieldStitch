@@ -1654,7 +1654,7 @@ async function openXyz() {
   let st;
   try { st = await api("/api/xyz/settings"); } catch (e) { return toast(e.message); }
   $("xyzName").value = st.name;
-  $("xyzOwner").value = st.owner;
+  xyz.owner = st.owner;
   $("xyzParent").value = st.parent;
   $("xyzZmin").value = st.zmin;
   $("xyzZmax").value = st.zmax;
@@ -1665,7 +1665,7 @@ async function openXyz() {
   if (!$("xyzDlg").open) $("xyzDlg").showModal();
   xyzCheck();
 }
-const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: $("xyzOwner").value.trim(), parent: $("xyzParent").value.trim(),
+const xyzRead = () => ({ name: $("xyzName").value.trim(), owner: xyz.owner || "", parent: $("xyzParent").value.trim(),
                          zmin: +$("xyzZmin").value, zmax: +$("xyzZmax").value,
                          tile: +$("xyzTile").value || 256 });
 function xyzCheckSoon() { clearTimeout(xyz.timer); xyz.timer = setTimeout(xyzCheck, 350); }
@@ -1974,7 +1974,7 @@ function wire() {
   $("exGeotiff").onclick = () => openExport(false);
   $("exXag").onclick = openXyz;
   $("exBounds").onclick = openOutlines;
-  ["xyzName", "xyzOwner", "xyzParent", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
+  ["xyzName", "xyzParent", "xyzZmin", "xyzZmax", "xyzTile"].forEach((id) => ($(id).oninput = xyzCheckSoon));
   $("xyzTile").onchange = xyzCheckSoon;
   $("xyzBrowse").onclick = async () => { const p = await browse("folder", "Save the map's tile folder in", $("xyzParent").value); if (p) { $("xyzParent").value = p; xyzCheck(); } };
   $("xyzOpen").onclick = () => api("/api/open_path", { path: xyz.folder });

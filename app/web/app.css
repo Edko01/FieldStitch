@@ -556,7 +556,7 @@ dialog.modal .bar { margin: 4px 0 12px; }
 .exportlist .startbtn { width: 100%; text-align: left; }
 .exportlist .startbtn svg { width: 26px; height: 26px; }
 .exportlist .startbtn b { font-size: 14px; }
-.xyzgrid { display: grid; grid-template-columns: 1.4fr 1fr .6fr .6fr 1fr; gap: 10px 12px; margin: 10px 0 4px; }
+.xyzgrid { display: grid; grid-template-columns: 1.6fr .6fr .6fr 1fr; gap: 10px 12px; margin: 10px 0 4px; }
 .xyzgrid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--ink-2); margin: 0; }
 .xyzgrid input { width: 100%; }
 .xyzinfo { display: grid; grid-template-columns: 1fr; gap: 6px; margin: 12px 0 6px; padding: 10px 12px; background: var(--sage); border-radius: var(--radius-s); font-size: 13px; }
