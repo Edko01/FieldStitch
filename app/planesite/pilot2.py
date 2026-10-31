@@ -239,7 +239,8 @@ def estimates(ring_xy, s):
     return {"area_ha": round(float(area) / 1e4, 2), "area_ac": round(float(area) / 4046.8564224, 1),
             "gsd_cm": round(gsd_cm, 2), "line_spacing_m": round(line_sp, 1), "photo_spacing_m": round(photo_sp, 1),
             "lines": lines, "length_km": round(float(length) / 1000, 1), "minutes": int(round(secs / 60)),
-            "photos": photos, "batteries": batt}
+            "photos": photos, "batteries": batt,
+            "gsd_cm_per_m": 100 * SENSOR_W_MM / FOCAL_MM / IMAGE_W_PX}   # the window links GSD and height
 
 
 def mission_settings(given=None):

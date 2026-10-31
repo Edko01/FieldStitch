@@ -1393,7 +1393,10 @@ function p2Fill(r, first) {
   $("p2Dir").disabled = $("p2Auto").checked;
   $("p2Axis").textContent = "(" + Math.round(s.long_axis) + "°)";
   const e = r.estimates;
-  $("p2Gsd").textContent = "GSD ≈ " + fmt(e.gsd_cm, 1) + " cm";       // GSD is quoted in cm, even in the US
+  // GSD (in cm, as it's always quoted) and height are linked, as in Pilot 2: the server's camera
+  // gives cm of GSD per metre of height
+  if (e.gsd_cm_per_m) p2.k = e.gsd_cm_per_m;
+  if (document.activeElement !== $("p2GsdIn")) $("p2GsdIn").value = (Math.round(e.gsd_cm * 100) / 100).toFixed(2);
   $("p2Est").innerHTML = "";
   const parts = [
     ["Field", fmt(e.area_ha * 2.47105, e.area_ha * 2.47105 < 10 ? 1 : 0) + " ac"],
@@ -2228,6 +2231,16 @@ function wire() {
   };
   // send to Pilot 2
   for (const id of Object.values(p2Fields)) $(id).oninput = p2Changed;
+  // typing a GSD sets the height (exactly, in metres, so it isn't rounded through feet)
+  $("p2GsdIn").oninput = () => {
+    const g = parseFloat($("p2GsdIn").value);
+    if (!(g > 0) || !p2.k) return;
+    const m = g / p2.k;
+    $("p2Height").value = String(Math.round(m * P2_US.height_m[0]));
+    p2.raw.height_m = m; p2.shown.height_m = $("p2Height").value;
+    p2Changed();
+  };
+  $("p2GsdIn").onblur = () => p2Changed();
   $("p2Auto").onchange = p2Changed;
   $("p2Save").onclick = () => p2Go(false);
   $("p2Form").onsubmit = (e) => { if (e.submitter && e.submitter.value === "send") { e.preventDefault(); p2Go(true); } };
