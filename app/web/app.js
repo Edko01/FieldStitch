@@ -1674,12 +1674,13 @@ async function xyzCheck() {
   const b = xyzRead();
   const zmax = b.zmax;
   const cm = xyz.m0 ? (xyz.m0 / 2 ** zmax) * 100 * (256 / (b.tile || 256)) : 0;
-  $("xyzZoomNote").textContent = xyz.gsd && cm
-    ? "At zoom " + zmax + " a tile pixel covers about " + fmt(cm, cm < 10 ? 1 : 0) + " cm (" + fmt(cm / 2.54, 1) + " in); the orthomosaic is " +
-      fmt(xyz.gsd, 1) + " cm. Each zoom level up has about 4 times the tiles of the one below" +
-      (b.tile === 512 ? "; 512 px tiles are about 4 times the size of 256 px ones." : ".") +
-      (cm < xyz.gsd * 0.9 ? " That's finer than the orthomosaic: no extra detail, only more space." : "")
+  // only speak up when the top zoom asks for more detail than the orthomosaic has
+  const note = xyz.gsd && cm && cm < xyz.gsd * 0.9
+    ? "At zoom " + zmax + " a tile pixel is about " + fmt(cm, 1) + " cm, finer than the orthomosaic's " + fmt(xyz.gsd, 1) +
+      " cm: no extra detail, only more tiles."
     : "";
+  $("xyzZoomNote").textContent = note;
+  $("xyzZoomNote").hidden = !note;
   try {
     const r = await api("/api/xyz/check", b);
     if (seq !== xyz.seq) return;

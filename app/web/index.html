@@ -461,7 +461,6 @@
 <dialog class="modal wide" id="xyzDlg" aria-labelledby="xyzTitle">
   <form method="dialog" id="xyzForm">
     <header class="modalhead"><h2 id="xyzTitle">XAG map tiles</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
-    <p class="hint small">The whole orthomosaic as one folder of web-map tiles (PNG, {z}/{x}/{y}.png). Then <b>Publish to GitHub</b> puts the folder in its own repository, where the XAG One app loads it as a base map. Empty tiles are left out.</p>
     <div class="xyzgrid">
       <label title="The name of the GitHub repository that will hold this map">Map name (GitHub repo)<input id="xyzName" autocomplete="off" spellcheck="false" maxlength="100"></label>
       <label>From zoom<input type="number" id="xyzZmin" min="0" max="23" step="1"></label>
