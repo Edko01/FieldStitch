@@ -79,7 +79,7 @@ def open_window(url):
     profile = os.path.join(data_dir(), "window")
     for exe in _browser_candidates():
         try:
-            return subprocess.Popen([exe, "--app=" + url, "--user-data-dir=" + profile, "--window-size=1440,900",
+            return subprocess.Popen([exe, "--app=" + url, "--user-data-dir=" + profile, "--start-maximized",
                                      "--no-first-run", "--no-default-browser-check"] + WINDOW_FLAGS,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
