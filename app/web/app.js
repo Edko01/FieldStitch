@@ -1348,7 +1348,6 @@ async function openPilot2(id) {
   p2.id = id;
   setErr("p2Err", "");
   $("p2Ok").hidden = true;
-  $("p2Field").textContent = a.name;
   $("p2Est").textContent = "Working out the mission…";
   $("p2Notes").innerHTML = "";
   $("p2Name").value = "";
