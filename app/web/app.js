@@ -1337,7 +1337,10 @@ function focusArea(id, zoom, noScroll) {
 }
 
 // ------------------------------------------------------------------ send to Pilot 2
-const p2 = { id: null, timer: 0, conn: null, seq: 0 };
+const p2 = { id: null, timer: 0, conn: null, seq: 0, raw: {}, shown: {} };
+// The dialog shows US units; the mission (and the server) stay in metres. A value the user hasn't
+// touched is sent back exactly as it came, so the default 111.77 m doesn't drift through rounding.
+const P2_US = { height_m: [3.28084, 0], speed_ms: [2.23694, 1], margin_m: [3.28084, 0] };
 const p2Fields = { height_m: "p2Height", speed_ms: "p2Speed", margin_m: "p2Margin", overlap_front: "p2OvH", overlap_side: "p2OvW", direction: "p2Dir" };
 async function openPilot2(id) {
   const a = areas.find((x) => x.id === id);
@@ -1367,25 +1370,36 @@ function p2ConnState() {
 }
 function p2Read() {
   const s = { auto_direction: $("p2Auto").checked };
-  for (const [k, id] of Object.entries(p2Fields)) { const v = $(id).value; if (v !== "") s[k] = +v; }
+  for (const [k, id] of Object.entries(p2Fields)) {
+    const v = $(id).value;
+    if (v === "") continue;
+    const us = P2_US[k];
+    s[k] = !us ? +v : v === p2.shown[k] ? p2.raw[k] : +v / us[0];
+  }
   return s;
 }
 function p2Fill(r, first) {
   const s = r.settings;
   for (const [k, id] of Object.entries(p2Fields)) {
-    if (first || k === "direction") $(id).value = k === "height_m" ? +(+s[k]).toFixed(1) : Math.round(s[k] * 10) / 10;
+    if (!(first || k === "direction")) continue;
+    const us = P2_US[k];
+    if (us) {
+      const f = 10 ** us[1];
+      $(id).value = String(Math.round(s[k] * us[0] * f) / f);
+      p2.raw[k] = s[k]; p2.shown[k] = $(id).value;
+    } else $(id).value = Math.round(s[k] * 10) / 10;
   }
   if (first) { $("p2Auto").checked = !!s.auto_direction; $("p2Name").value = r.name; }
   $("p2Dir").disabled = $("p2Auto").checked;
   $("p2Axis").textContent = "(" + Math.round(s.long_axis) + "°)";
   const e = r.estimates;
-  $("p2Gsd").textContent = "≈ " + fmt(e.gsd_cm, 1) + " cm per pixel";
+  $("p2Gsd").textContent = "≈ " + fmt(e.gsd_cm / 2.54, 2) + " in (" + fmt(e.gsd_cm, 1) + " cm) per pixel";
   $("p2Est").innerHTML = "";
   const parts = [
-    ["Field", acHa(e.area_ha)],
-    ["Flight lines", e.lines + " lines, " + fmt(e.line_spacing_m, 1) + " m apart"],
-    ["Photos", "≈ " + fmt(e.photos) + " (every " + fmt(e.photo_spacing_m, 1) + " m)"],
-    ["Flight", "≈ " + fmt(e.length_km, 1) + " km, " + fmtDur(e.minutes * 60).replace("≈ ", "") + ", " + e.batteries + (e.batteries === 1 ? " battery" : " batteries")],
+    ["Field", fmt(e.area_ha * 2.47105, e.area_ha * 2.47105 < 10 ? 1 : 0) + " ac"],
+    ["Flight lines", e.lines + " lines, " + fmt(e.line_spacing_m * 3.28084) + " ft apart"],
+    ["Photos", "≈ " + fmt(e.photos) + " (every " + fmt(e.photo_spacing_m * 3.28084) + " ft)"],
+    ["Flight", "≈ " + fmt(e.length_km * 0.621371, 1) + " mi, " + fmtDur(e.minutes * 60).replace("≈ ", "") + ", " + e.batteries + (e.batteries === 1 ? " battery" : " batteries")],
   ];
   for (const [k, v] of parts) { const b = document.createElement("b"); b.textContent = k + ": "; $("p2Est").append(b, v, document.createElement("br")); }
   const small = document.createElement("small");

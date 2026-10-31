@@ -171,7 +171,7 @@ def mission_ring(area, simplify_m=0.5):
     if len(s) < 3:
         s = r
     if len(s) < len(r) and len(r) > 20:
-        notes.append("Outline simplified from %d to %d corners (within %.1f m)." % (len(r), len(s), simplify_m))
+        notes.append("Outline simplified from %d to %d corners (within %.1f ft)." % (len(r), len(s), simplify_m / 0.3048))
     return np.vstack([s, s[:1]]), notes
 
 
