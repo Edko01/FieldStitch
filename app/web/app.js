@@ -1369,7 +1369,7 @@ function p2ConnState() {
   $("p2Conn").open = !c.has_key;
 }
 function p2Read() {
-  const s = { auto_direction: $("p2Auto").checked };
+  const s = { auto_direction: $("p2Auto").checked, terrain_follow: $("p2Terrain").checked, elevation_optimize: $("p2ElevOpt").checked };
   for (const [k, id] of Object.entries(p2Fields)) {
     const v = $(id).value;
     if (v === "") continue;
@@ -1389,7 +1389,10 @@ function p2Fill(r, first) {
       p2.raw[k] = s[k]; p2.shown[k] = $(id).value;
     } else $(id).value = Math.round(s[k] * 10) / 10;
   }
-  if (first) { $("p2Auto").checked = !!s.auto_direction; $("p2Name").value = r.name; }
+  if (first) {
+    $("p2Auto").checked = !!s.auto_direction; $("p2Name").value = r.name;
+    $("p2Terrain").checked = s.terrain_follow !== false; $("p2ElevOpt").checked = !!s.elevation_optimize;
+  }
   $("p2Dir").disabled = $("p2Auto").checked;
   $("p2Axis").textContent = "(" + Math.round(s.long_axis) + "°)";
   const e = r.estimates;
@@ -2242,6 +2245,8 @@ function wire() {
   };
   $("p2GsdIn").onblur = () => p2Changed();
   $("p2Auto").onchange = p2Changed;
+  $("p2Terrain").onchange = p2Changed;
+  $("p2ElevOpt").onchange = p2Changed;
   $("p2Save").onclick = () => p2Go(false);
   $("p2Form").onsubmit = (e) => { if (e.submitter && e.submitter.value === "send") { e.preventDefault(); p2Go(true); } };
   $("p2Form").onkeydown = (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") e.preventDefault(); };

@@ -567,6 +567,8 @@
       <label>Flight lines (° from north)<input type="number" id="p2Dir" step="1" min="0" max="359"></label>
     </div>
     <label class="check"><input type="checkbox" id="p2Auto"> Run the flight lines along the field's long side <small class="muted" id="p2Axis"></small></label>
+    <label class="check" title="Pilot 2's Real-Time Follow: the aircraft keeps the flight height above the ground with its own sensors"><input type="checkbox" id="p2Terrain"> Real-time terrain follow <small class="muted">(holds the flight height above the ground)</small></label>
+    <label class="check" title="Pilot 2's Elevation Optimization"><input type="checkbox" id="p2ElevOpt"> Elevation optimization <small class="muted">(a short extra oblique pass at the end; better elevation accuracy)</small></label>
     <p class="expest" id="p2Est"></p>
     <ul class="p2notes" id="p2Notes"></ul>
     <details class="p2conn" id="p2Conn">

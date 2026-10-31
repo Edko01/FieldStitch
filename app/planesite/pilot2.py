@@ -47,14 +47,14 @@ TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
         <wpml:coordinateMode>WGS84</wpml:coordinateMode>
         <wpml:heightMode>relativeToStartPoint</wpml:heightMode>
         <wpml:globalShootHeight>{HEIGHT}</wpml:globalShootHeight>
-        <wpml:surfaceFollowModeEnable>1</wpml:surfaceFollowModeEnable>
-        <wpml:isRealtimeSurfaceFollow>1</wpml:isRealtimeSurfaceFollow>
+        <wpml:surfaceFollowModeEnable>{TERRAIN}</wpml:surfaceFollowModeEnable>
+        <wpml:isRealtimeSurfaceFollow>{TERRAIN}</wpml:isRealtimeSurfaceFollow>
         <wpml:surfaceRelativeHeight>{HEIGHT}</wpml:surfaceRelativeHeight>
       </wpml:waylineCoordinateSysParam>
       <wpml:autoFlightSpeed>{SPEED}</wpml:autoFlightSpeed>
       <Placemark>
         <wpml:caliFlightEnable>0</wpml:caliFlightEnable>
-        <wpml:elevationOptimizeEnable>0</wpml:elevationOptimizeEnable>
+        <wpml:elevationOptimizeEnable>{ELEV_OPT}</wpml:elevationOptimizeEnable>
         <wpml:smartObliqueEnable>0</wpml:smartObliqueEnable>
         <wpml:quickOrthoMappingEnable>0</wpml:quickOrthoMappingEnable>
         <wpml:facadeWaylineEnable>0</wpml:facadeWaylineEnable>
@@ -94,7 +94,12 @@ TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 
 # Justin's defaults (hub-integration.md)
 DEFAULTS = {"height_m": 111.771522521973, "speed_ms": 15.0, "direction": 90.0, "auto_direction": False,
-            "margin_m": 15.0, "overlap_front": 80, "overlap_side": 70, "battery_min": 35.0}
+            "margin_m": 15.0, "overlap_front": 80, "overlap_side": 70, "battery_min": 35.0,
+            # Pilot 2's "Real-Time Follow" (terrain follow on the aircraft's own sensors, at the
+            # flight height above the ground) and "Elevation Optimization" (a short oblique pass at
+            # the end for better elevation accuracy)
+            "terrain_follow": True, "elevation_optimize": False}
+_BOOLS = ("auto_direction", "terrain_follow", "elevation_optimize")
 
 # M4E wide camera
 SENSOR_W_MM, SENSOR_H_MM, FOCAL_MM, IMAGE_W_PX = 17.3, 13.0, 12.29, 5280
@@ -247,7 +252,7 @@ def mission_settings(given=None):
     s = dict(DEFAULTS)
     for k, v in (given or {}).items():
         if k in DEFAULTS and v is not None and v != "":
-            s[k] = bool(v) if k == "auto_direction" else float(v)
+            s[k] = bool(v) if k in _BOOLS else float(v)
     s["height_m"] = min(max(s["height_m"], 12.0), 500.0)
     s["speed_ms"] = min(max(s["speed_ms"], 1.0), 15.0)
     s["margin_m"] = min(max(s["margin_m"], 0.0), 200.0)
@@ -264,6 +269,8 @@ def template_kml(ring_ll, s, now_ms=None):
     vals = {"CREATE_MS": str(now_ms), "UPDATE_MS": str(now_ms), "TAKEOFF_SECURITY_HEIGHT": _num(s["height_m"]),
             "HEIGHT": _num(s["height_m"]), "SPEED": _num(s["speed_ms"]), "DIRECTION": _num(round(s["direction"])),
             "MARGIN": _num(s["margin_m"]), "OVERLAP_H": _num(s["overlap_front"]), "OVERLAP_W": _num(s["overlap_side"]),
+            "TERRAIN": "1" if s.get("terrain_follow", True) else "0",
+            "ELEV_OPT": "1" if s.get("elevation_optimize") else "0",
             "COORDS": coords}
     out = TEMPLATE
     for k, v in vals.items():
