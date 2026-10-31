@@ -1797,7 +1797,7 @@ async function pubTargets() {
   }
   const ids = pub.targets.targets.filter((t) => t.ok).map((t) => t.id);
   sel.value = ids.includes(keep) ? keep : ids.includes("EdkoLLC") ? "EdkoLLC" : ids[0] || "";
-  $("pubInstall").hidden = !pub.targets.add_url;
+  $("pubInstall").hidden = !pub.targets.add_url || pub.targets.targets.some((t) => t.ok);
   $("pubInstallUrl").textContent = pub.targets.add_url || "";
   if (!pub.targets.targets.length) $("pubTargetNote").textContent = "PlaneSite isn't installed on any GitHub account or organisation you can reach yet.";
   pubTargetNote();

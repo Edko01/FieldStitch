@@ -489,7 +489,6 @@
 <dialog class="modal wide" id="pubDlg" aria-labelledby="pubTitle">
   <form method="dialog" id="pubForm">
     <header class="modalhead"><h2 id="pubTitle">Publish to GitHub</h2><button class="iconbtn sm" value="cancel" aria-label="Close"><svg><use href="#i-close"/></svg></button></header>
-    <p class="hint small">Puts the map's tile folder in its own public GitHub repository, where the XAG One app loads it. Large maps go up in several parts.</p>
     <section class="pubacct">
       <div id="pubSignedOut">
         <p><b>GitHub account</b><br><small class="muted">Sign in once. PlaneSite keeps the sign-in in Windows Credential Manager.</small></p>
@@ -521,7 +520,7 @@
         <label>Repository name<input id="pubName" autocomplete="off" spellcheck="false" maxlength="100"></label>
       </div>
       <p class="hint small" id="pubTargetNote"></p>
-      <p class="hint small" id="pubInstall" hidden>Organisation not listed? PlaneSite isn't installed there yet. Send this link to an owner of the organisation: <code id="pubInstallUrl"></code> <button type="button" class="linkish" id="pubInstallCopy">Copy link</button></p>
+      <p class="hint small" id="pubInstall" hidden>PlaneSite isn't installed on a GitHub organisation you belong to yet. Send this link to an owner of the organisation: <code id="pubInstallUrl"></code> <button type="button" class="linkish" id="pubInstallCopy">Copy link</button></p>
       <label>Map<select id="pubMap"></select></label>
       <div class="xyzinfo">
         <div><small>Tiles</small><b id="pubTiles">–</b></div>
